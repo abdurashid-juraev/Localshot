@@ -1,0 +1,679 @@
+component ResizeHandle inherits Rectangle {
+    in property <color> handle-color: #0088ff;
+    in property <MouseCursor> cursor: default;
+    callback dragged(length, length);
+    callback released();
+
+    width: 10px;
+    height: 10px;
+    background: #ffffff;
+    border-color: root.handle-color;
+    border-width: 1.5px;
+    border-radius: 2px;
+    drop-shadow-blur: 3px;
+    drop-shadow-color: #00000066;
+
+    TouchArea {
+        mouse-cursor: root.cursor;
+        property <length> grab-x: 0px;
+        property <length> grab-y: 0px;
+        property <bool> is-dragging: false;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                self.grab-x = self.mouse-x;
+                self.grab-y = self.mouse-y;
+                self.is-dragging = true;
+            } else if (event.kind == PointerEventKind.up) {
+                self.is-dragging = false;
+                root.released();
+            }
+        }
+
+        moved => {
+            if (self.is-dragging) {
+                root.dragged(self.mouse-x - self.grab-x, self.mouse-y - self.grab-y);
+            }
+        }
+    }
+}
+
+component ToolButton inherits Rectangle {
+    in property <string> text-icon;
+    in property <string> tooltip-title;
+    in property <string> tooltip-shortcut: "";
+    in property <string> tooltip-side: "left"; // "left", "top", "right"
+    in property <bool> active: false;
+    in property <color> hover-tint: #ffffff22;
+    in property <color> active-bg: #2563eb;
+    in property <color> custom-icon-color: #cbd5e1;
+    in property <color> hover-icon-color: #ffffff;
+    callback clicked();
+
+    width: 38px;
+    height: 38px;
+    border-radius: 8px;
+    background: root.active ? root.active-bg : (touch.has-hover ? root.hover-tint : transparent);
+    border-color: root.active ? #60a5fa : (touch.has-hover ? #ffffff33 : transparent);
+    border-width: 1px;
+
+    Text {
+        text: root.text-icon;
+        font-size: 19px;
+        font-weight: 700;
+        color: root.active ? #ffffff : (touch.has-hover ? root.hover-icon-color : root.custom-icon-color);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    // Floating Tooltip Badge
+    if touch.has-hover && root.tooltip-title != "" : tip-box := Rectangle {
+        x: root.tooltip-side == "left" ? -self.width - 10px : 
+           (root.tooltip-side == "top" ? (parent.width - self.width) / 2 : parent.width + 10px);
+        y: root.tooltip-side == "top" ? -34px : (parent.height - self.height) / 2;
+        width: tip-layout.preferred-width + 18px;
+        height: 28px;
+        background: #0f172a;
+        border-radius: 6px;
+        border-color: #334155;
+        border-width: 1px;
+        drop-shadow-blur: 10px;
+        drop-shadow-color: #000000bb;
+        z: 200;
+
+        tip-layout := HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 6px;
+            alignment: center;
+
+            Text {
+                text: root.tooltip-title;
+                font-size: 12px;
+                font-weight: 600;
+                color: #f8fafc;
+                vertical-alignment: center;
+            }
+
+            if root.tooltip-shortcut != "" : Rectangle {
+                background: #1e293b;
+                border-radius: 4px;
+                border-color: #475569;
+                border-width: 1px;
+                width: sc-text.preferred-width + 8px;
+                height: 18px;
+
+                sc-text := Text {
+                    text: root.tooltip-shortcut;
+                    font-size: 10px;
+                    font-weight: 700;
+                    color: #94a3b8;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+component ColorDot inherits Rectangle {
+    in property <color> dot-color;
+    in property <string> tooltip-title;
+    in property <bool> is-active: false;
+    callback clicked();
+
+    width: 22px;
+    height: 22px;
+    border-radius: 11px;
+    background: root.dot-color;
+    border-color: root.is-active ? #ffffff : (dot-touch.has-hover ? #ffffffbb : #00000066);
+    border-width: root.is-active ? 2.5px : 1.5px;
+    drop-shadow-blur: root.is-active ? 6px : 0px;
+    drop-shadow-color: #ffffff66;
+
+    dot-touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    if dot-touch.has-hover && root.tooltip-title != "" : tip-dot := Rectangle {
+        x: -self.width - 10px;
+        y: (parent.height - self.height) / 2;
+        width: dot-tip-txt.preferred-width + 16px;
+        height: 24px;
+        background: #0f172a;
+        border-radius: 5px;
+        border-color: #334155;
+        border-width: 1px;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #000000aa;
+        z: 200;
+
+        dot-tip-txt := Text {
+            text: root.tooltip-title;
+            font-size: 11px;
+            font-weight: 600;
+            color: #f8fafc;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component OverlayWindow inherits Window {
+    in-out property <image> background-image;
+    in-out property <bool> is-selecting: false;
+    in-out property <bool> has-selection: false;
+    in-out property <length> sel-x: 0px;
+    in-out property <length> sel-y: 0px;
+    in-out property <length> sel-w: 0px;
+    in-out property <length> sel-h: 0px;
+    in-out property <string> dimension-text: "";
+
+    // Active tool: "select", "pen", "line", "arrow", "rect", "marker", "redact"
+    in-out property <string> active-tool: "select";
+    // Active color index: 0=Red, 1=Blue, 2=Green, 3=Yellow, 4=White, 5=Black
+    in-out property <int> active-color-idx: 0;
+
+    callback close-requested();
+    callback copy-requested();
+    callback save-requested();
+    callback undo-requested();
+    callback tool-selected(string);
+    callback color-selected(int);
+
+    callback selection-changed(length, length, length, length);
+    callback selection-finished(length, length, length, length);
+
+    callback draw-started(length, length);
+    callback draw-moved(length, length);
+    callback draw-finished(length, length);
+
+    no-frame: true;
+    always-on-top: true;
+
+    // Desktop background
+    Image {
+        width: 100%;
+        height: 100%;
+        source: root.background-image;
+    }
+
+    // Dimmed overlay
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000080;
+    }
+
+    // Cutout Viewport
+    if root.has-selection || root.is-selecting : Rectangle {
+        x: root.sel-x;
+        y: root.sel-y;
+        width: root.sel-w;
+        height: root.sel-h;
+        clip: true;
+
+        Image {
+            x: -root.sel-x;
+            y: -root.sel-y;
+            width: root.width;
+            height: root.height;
+            source: root.background-image;
+        }
+
+        // Selection border
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            border-color: #0088ff;
+            border-width: 1.5px;
+        }
+
+        // In-selection moving touch area (active when in "select" tool mode)
+        if root.has-selection && root.active-tool == "select" : TouchArea {
+            width: 100%;
+            height: 100%;
+            mouse-cursor: move;
+
+            property <length> grab-x: 0px;
+            property <length> grab-y: 0px;
+            property <bool> is-moving: false;
+
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    self.grab-x = self.mouse-x;
+                    self.grab-y = self.mouse-y;
+                    self.is-moving = true;
+                } else if (event.kind == PointerEventKind.up) {
+                    self.is-moving = false;
+                    root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
+                }
+            }
+
+            moved => {
+                if (self.is-moving) {
+                    let new-x = root.sel-x + (self.mouse-x - self.grab-x);
+                    let new-y = root.sel-y + (self.mouse-y - self.grab-y);
+                    root.sel-x = max(0px, min(new-x, root.width - root.sel-w));
+                    root.sel-y = max(0px, min(new-y, root.height - root.sel-h));
+                    root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
+                }
+            }
+        }
+
+        // In-selection drawing touch area (active when an annotation tool is selected)
+        if root.has-selection && root.active-tool != "select" : TouchArea {
+            width: 100%;
+            height: 100%;
+
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    root.draw-started(self.mouse-x, self.mouse-y);
+                } else if (event.kind == PointerEventKind.up) {
+                    root.draw-finished(self.mouse-x, self.mouse-y);
+                }
+            }
+
+            moved => {
+                root.draw-moved(self.mouse-x, self.mouse-y);
+            }
+        }
+    }
+
+    // Dimension Badge
+    if (root.has-selection || root.is-selecting) && root.sel-w > 20px && root.sel-h > 20px : Rectangle {
+        x: root.sel-x;
+        y: root.sel-y > 28px ? root.sel-y - 28px : root.sel-y + 6px;
+        width: 104px;
+        height: 24px;
+        background: #0f172aee;
+        border-radius: 6px;
+        border-color: #334155;
+        border-width: 1px;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000088;
+
+        Text {
+            text: root.dimension-text;
+            color: #f8fafc;
+            font-size: 12px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    // 8-Point Resize Handles
+    if root.has-selection && !root.is-selecting && root.active-tool == "select" && root.sel-w > 16px && root.sel-h > 16px : Rectangle {
+        x: root.sel-x;
+        y: root.sel-y;
+        width: root.sel-w;
+        height: root.sel-h;
+
+        // Top-Left (NW)
+        ResizeHandle {
+            x: -5px; y: -5px; cursor: nwse-resize;
+            dragged(dx, dy) => {
+                let nw = root.sel-w - dx;
+                let nh = root.sel-h - dy;
+                let nx = root.sel-x + dx;
+                let ny = root.sel-y + dy;
+                if (nw >= 16px && nx >= 0px) { root.sel-x = nx; root.sel-w = nw; }
+                if (nh >= 16px && ny >= 0px) { root.sel-y = ny; root.sel-h = nh; }
+                root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
+            }
+            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
+        }
+
+        // Top (N)
+        ResizeHandle {
+            x: (parent.width - 10px) / 2; y: -5px; cursor: ns-resize;
+            dragged(_dx, dy) => {
+                let nh = root.sel-h - dy;
+                let ny = root.sel-y + dy;
+                if (nh >= 16px && ny >= 0px) { root.sel-y = ny; root.sel-h = nh; }
+                root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
+            }
+            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
+        }
+
+        // Top-Right (NE)
+        ResizeHandle {
+            x: parent.width - 5px; y: -5px; cursor: nesw-resize;
+            dragged(dx, dy) => {
+                let nw = root.sel-w + dx;
+                let nh = root.sel-h - dy;
+                let ny = root.sel-y + dy;
+                if (nw >= 16px && root.sel-x + nw <= root.width) { root.sel-w = nw; }
+                if (nh >= 16px && ny >= 0px) { root.sel-y = ny; root.sel-h = nh; }
+                root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
+            }
+            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
+        }
+
+        // Left (W)
+        ResizeHandle {
+            x: -5px; y: (parent.height - 10px) / 2; cursor: ew-resize;
+            dragged(dx, _dy) => {
+                let nw = root.sel-w - dx;
+                let nx = root.sel-x + dx;
+                if (nw >= 16px && nx >= 0px) { root.sel-x = nx; root.sel-w = nw; }
+                root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
+            }
+            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
+        }
+
+        // Right (E)
+        ResizeHandle {
+            x: parent.width - 5px; y: (parent.height - 10px) / 2; cursor: ew-resize;
+            dragged(dx, _dy) => {
+                let nw = root.sel-w + dx;
+                if (nw >= 16px && root.sel-x + nw <= root.width) { root.sel-w = nw; }
+                root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
+            }
+            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
+        }
+
+        // Bottom-Left (SW)
+        ResizeHandle {
+            x: -5px; y: parent.height - 5px; cursor: nesw-resize;
+            dragged(dx, dy) => {
+                let nw = root.sel-w - dx;
+                let nh = root.sel-h + dy;
+                let nx = root.sel-x + dx;
+                if (nw >= 16px && nx >= 0px) { root.sel-x = nx; root.sel-w = nw; }
+                if (nh >= 16px && root.sel-y + nh <= root.height) { root.sel-h = nh; }
+                root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
+            }
+            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
+        }
+
+        // Bottom (S)
+        ResizeHandle {
+            x: (parent.width - 10px) / 2; y: parent.height - 5px; cursor: ns-resize;
+            dragged(_dx, dy) => {
+                let nh = root.sel-h + dy;
+                if (nh >= 16px && root.sel-y + nh <= root.height) { root.sel-h = nh; }
+                root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
+            }
+            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
+        }
+
+        // Bottom-Right (SE)
+        ResizeHandle {
+            x: parent.width - 5px; y: parent.height - 5px; cursor: nwse-resize;
+            dragged(dx, dy) => {
+                let nw = root.sel-w + dx;
+                let nh = root.sel-h + dy;
+                if (nw >= 16px && root.sel-x + nw <= root.width) { root.sel-w = nw; }
+                if (nh >= 16px && root.sel-y + nh <= root.height) { root.sel-h = nh; }
+                root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
+            }
+            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
+        }
+    }
+
+    // Global Selection Drag Area (active only when in "select" tool mode)
+    if !root.has-selection || root.active-tool == "select" : TouchArea {
+        width: 100%;
+        height: 100%;
+
+        property <length> origin-x: 0px;
+        property <length> origin-y: 0px;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                self.origin-x = self.mouse-x;
+                self.origin-y = self.mouse-y;
+                root.is-selecting = true;
+                root.has-selection = false;
+                root.sel-x = self.mouse-x;
+                root.sel-y = self.mouse-y;
+                root.sel-w = 0px;
+                root.sel-h = 0px;
+            } else if (event.kind == PointerEventKind.up) {
+                root.is-selecting = false;
+                if (root.sel-w > 10px && root.sel-h > 10px) {
+                    root.has-selection = true;
+                    root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
+                } else {
+                    root.has-selection = false;
+                }
+            }
+        }
+
+        moved => {
+            if (root.is-selecting) {
+                if (self.mouse-x >= self.origin-x) {
+                    root.sel-x = self.origin-x;
+                    root.sel-w = self.mouse-x - self.origin-x;
+                } else {
+                    root.sel-x = self.mouse-x;
+                    root.sel-w = self.origin-x - self.mouse-x;
+                }
+
+                if (self.mouse-y >= self.origin-y) {
+                    root.sel-y = self.origin-y;
+                    root.sel-h = self.mouse-y - self.origin-y;
+                } else {
+                    root.sel-y = self.mouse-y;
+                    root.sel-h = self.origin-y - self.mouse-y;
+                }
+
+                root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
+            }
+        }
+    }
+
+    // ==========================================
+    // DUAL TOOLBAR (Lightshot 1:1 Floating Bars)
+    // ==========================================
+    if root.has-selection && !root.is-selecting : Rectangle {
+        // Safe position calculation to prevent overflowing screen boundaries
+        property <length> right-edge: root.sel-x + root.sel-w;
+        property <length> bottom-edge: root.sel-y + root.sel-h;
+
+        // --- VERTICAL TOOLBAR (Right of Selection) ---
+        Rectangle {
+            x: (parent.right-edge + 52px <= root.width) ? parent.right-edge + 8px : parent.right-edge - 54px;
+            y: (root.sel-y + 390px <= root.height) ? root.sel-y : (root.height - 396px > 8px ? root.height - 396px : 8px);
+            width: 46px;
+            height: 384px;
+            background: #1e222bcc;
+            border-radius: 10px;
+            border-color: #334155;
+            border-width: 1px;
+            drop-shadow-blur: 14px;
+            drop-shadow-color: #00000088;
+
+            VerticalLayout {
+                padding: 4px;
+                spacing: 3px;
+                alignment: center;
+
+                ToolButton {
+                    text-icon: "✎";
+                    tooltip-title: "Pen (Freehand)";
+                    tooltip-shortcut: "P";
+                    active: root.active-tool == "pen";
+                    clicked => { root.active-tool = root.active-tool == "pen" ? "select" : "pen"; root.tool-selected(root.active-tool); }
+                }
+                ToolButton {
+                    text-icon: "―";
+                    tooltip-title: "Line (Straight)";
+                    tooltip-shortcut: "L";
+                    active: root.active-tool == "line";
+                    clicked => { root.active-tool = root.active-tool == "line" ? "select" : "line"; root.tool-selected(root.active-tool); }
+                }
+                ToolButton {
+                    text-icon: "➔";
+                    tooltip-title: "Arrow";
+                    tooltip-shortcut: "A";
+                    active: root.active-tool == "arrow";
+                    clicked => { root.active-tool = root.active-tool == "arrow" ? "select" : "arrow"; root.tool-selected(root.active-tool); }
+                }
+                ToolButton {
+                    text-icon: "▭";
+                    tooltip-title: "Rectangle";
+                    tooltip-shortcut: "R";
+                    active: root.active-tool == "rect";
+                    clicked => { root.active-tool = root.active-tool == "rect" ? "select" : "rect"; root.tool-selected(root.active-tool); }
+                }
+                ToolButton {
+                    text-icon: "🖍";
+                    tooltip-title: "Highlighter";
+                    tooltip-shortcut: "M";
+                    active: root.active-tool == "marker";
+                    clicked => { root.active-tool = root.active-tool == "marker" ? "select" : "marker"; root.tool-selected(root.active-tool); }
+                }
+                ToolButton {
+                    text-icon: "░";
+                    tooltip-title: "Blur / Redact";
+                    tooltip-shortcut: "B";
+                    active: root.active-tool == "redact";
+                    clicked => { root.active-tool = root.active-tool == "redact" ? "select" : "redact"; root.tool-selected(root.active-tool); }
+                }
+
+                // Separator line
+                Rectangle { height: 1px; background: #334155; }
+
+                // Color palette circles
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    ColorDot { dot-color: #e53935; tooltip-title: "Red"; is-active: root.active-color-idx == 0; clicked => { root.active-color-idx = 0; root.color-selected(0); } }
+                    ColorDot { dot-color: #1e88e5; tooltip-title: "Blue"; is-active: root.active-color-idx == 1; clicked => { root.active-color-idx = 1; root.color-selected(1); } }
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    ColorDot { dot-color: #43a047; tooltip-title: "Green"; is-active: root.active-color-idx == 2; clicked => { root.active-color-idx = 2; root.color-selected(2); } }
+                    ColorDot { dot-color: #fdd835; tooltip-title: "Yellow"; is-active: root.active-color-idx == 3; clicked => { root.active-color-idx = 3; root.color-selected(3); } }
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    ColorDot { dot-color: #ffffff; tooltip-title: "White"; is-active: root.active-color-idx == 4; clicked => { root.active-color-idx = 4; root.color-selected(4); } }
+                    ColorDot { dot-color: #212121; tooltip-title: "Black"; is-active: root.active-color-idx == 5; clicked => { root.active-color-idx = 5; root.color-selected(5); } }
+                }
+
+                Rectangle { height: 1px; background: #334155; }
+
+                ToolButton {
+                    text-icon: "↶";
+                    tooltip-title: "Undo";
+                    tooltip-shortcut: "Ctrl+Z";
+                    clicked => { root.undo-requested(); }
+                }
+            }
+        }
+
+        // --- HORIZONTAL TOOLBAR (Bottom of Selection) ---
+        Rectangle {
+            x: (parent.right-edge - 160px >= 8px) ? parent.right-edge - 160px : 8px;
+            y: (parent.bottom-edge + 52px <= root.height) ? parent.bottom-edge + 8px : parent.bottom-edge - 52px;
+            width: 156px;
+            height: 46px;
+            background: #1e222bcc;
+            border-radius: 10px;
+            border-color: #334155;
+            border-width: 1px;
+            drop-shadow-blur: 14px;
+            drop-shadow-color: #00000088;
+
+            HorizontalLayout {
+                padding: 4px;
+                spacing: 6px;
+                alignment: center;
+
+                ToolButton {
+                    text-icon: "✕";
+                    tooltip-title: "Close";
+                    tooltip-shortcut: "Esc";
+                    tooltip-side: "top";
+                    hover-tint: #ef444433;
+                    hover-icon-color: #f87171;
+                    clicked => { root.close-requested(); }
+                }
+                ToolButton {
+                    text-icon: "💾";
+                    tooltip-title: "Save to File";
+                    tooltip-shortcut: "Ctrl+S";
+                    tooltip-side: "top";
+                    hover-tint: #10b98133;
+                    hover-icon-color: #34d399;
+                    clicked => { root.save-requested(); }
+                }
+                ToolButton {
+                    text-icon: "📋";
+                    tooltip-title: "Copy to Clipboard";
+                    tooltip-shortcut: "Ctrl+C";
+                    tooltip-side: "top";
+                    hover-tint: #3b82f633;
+                    hover-icon-color: #60a5fa;
+                    clicked => { root.copy-requested(); }
+                }
+            }
+        }
+    }
+
+    // Keyboard Shortcuts
+    ForwardFocus := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.close-requested();
+                accept
+            } else if (event.text == Key.Return) {
+                root.copy-requested();
+                accept
+            } else if (event.text == "a" && event.modifiers.control) {
+                root.sel-x = 0px;
+                root.sel-y = 0px;
+                root.sel-w = root.width;
+                root.sel-h = root.height;
+                root.has-selection = true;
+                root.selection-finished(0px, 0px, root.width, root.height);
+                accept
+            } else if (event.text == "c" && event.modifiers.control) {
+                root.copy-requested();
+                accept
+            } else if (event.text == "s" && event.modifiers.control) {
+                root.save-requested();
+                accept
+            } else if (event.text == "z" && event.modifiers.control) {
+                root.undo-requested();
+                accept
+            } else if (event.text == "p" || event.text == "P") {
+                root.active-tool = root.active-tool == "pen" ? "select" : "pen";
+                root.tool-selected(root.active-tool);
+                accept
+            } else if (event.text == "l" || event.text == "L") {
+                root.active-tool = root.active-tool == "line" ? "select" : "line";
+                root.tool-selected(root.active-tool);
+                accept
+            } else if (event.text == "a" || event.text == "A") {
+                root.active-tool = root.active-tool == "arrow" ? "select" : "arrow";
+                root.tool-selected(root.active-tool);
+                accept
+            } else if (event.text == "r" || event.text == "R") {
+                root.active-tool = root.active-tool == "rect" ? "select" : "rect";
+                root.tool-selected(root.active-tool);
+                accept
+            } else if (event.text == "m" || event.text == "M") {
+                root.active-tool = root.active-tool == "marker" ? "select" : "marker";
+                root.tool-selected(root.active-tool);
+                accept
+            } else if (event.text == "b" || event.text == "B") {
+                root.active-tool = root.active-tool == "redact" ? "select" : "redact";
+                root.tool-selected(root.active-tool);
+                accept
+            } else {
+                reject
+            }
+        }
+    }
+}

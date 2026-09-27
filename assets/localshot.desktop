@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=LocalShot
+GenericName=Screenshot Tool
+Comment=100% Offline Privacy-First Lightshot Clone
+Exec=$HOME/.local/bin/localshot
+Icon=$HOME/.local/share/icons/localshot.svg
+Terminal=false
+Type=Application
+Categories=Utility;Graphics;Photography;
+Keywords=screenshot;capture;lightshot;localshot;screen;snip;
+StartupNotify=false

@@ -1,0 +1,19 @@
+[package]
+name = "localshot"
+version = "0.1.0"
+edition = "2021"
+authors = ["LocalShot Team"]
+description = "100% offline, privacy-first, 1:1 Lightshot clone"
+license = "MIT"
+
+[dependencies]
+slint = { version = "1.8", default-features = true }
+xcap = { version = "0.0.14", features = ["vendored"] }
+arboard = "3.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+zeroize = { version = "1.8", features = ["alloc"] }
+dirs = "6.0"
+rfd = "0.15"
+
+[build-dependencies]
+slint-build = "1.8"

@@ -1,0 +1,18 @@
+# Rust Cargo build output (18GB+ binaries & intermediate objects)
+/target/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE and Editor specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.iml
+
+# Internal planning & AI task instructions
+task.md
