@@ -59,6 +59,7 @@ component ToolButton inherits Rectangle {
 
     Text {
         text: root.text-icon;
+        font-family: "Segoe UI Emoji", "sans-serif";
         font-size: 19px;
         font-weight: 700;
         color: root.active ? #ffffff : (touch.has-hover ? root.hover-icon-color : root.custom-icon-color);

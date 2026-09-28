@@ -14,6 +14,14 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 zeroize = { version = "1.8", features = ["alloc"] }
 dirs = "6.0"
 rfd = "0.15"
+global-hotkey = "0.8.0"
+tray-icon = "0.25.1"
+muda = "0.20.0"
+single-instance = "0.3.3"
+lazy_static = "1.5.0"
 
 [build-dependencies]
 slint-build = "1.8"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"

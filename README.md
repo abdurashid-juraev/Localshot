@@ -59,6 +59,24 @@ Direct binary path:
 ./target/release/localshot
 ```
 
+### Windows (Native)
+
+1. Build release binary (with embedded icon):
+```powershell
+cargo build --release
+```
+
+2. Automatic install & create Desktop + Start Menu launcher:
+Double-click `install.bat` or run:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Binary path:
+```
+target\release\localshot.exe
+```
+
 ### Windows (Cross-compilation from Linux)
 
 Compile standalone `.exe` using MinGW-w64:
