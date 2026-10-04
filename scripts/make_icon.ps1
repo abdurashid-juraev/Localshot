@@ -1,5 +1,5 @@
 param(
-    [string]$OutIcoPath = (Join-Path $PSScriptRoot "icon.ico")
+    [string]$OutIcoPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "assets\icon.ico")
 )
 
 Add-Type -AssemblyName System.Drawing

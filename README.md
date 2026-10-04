@@ -59,6 +59,11 @@ Direct binary path:
 ./target/release/localshot
 ```
 
+Or install system-wide to applications menu & desktop:
+```bash
+./scripts/install.sh
+```
+
 ### Windows (Native)
 
 1. Build release binary (with embedded icon):
@@ -67,9 +72,9 @@ cargo build --release
 ```
 
 2. Automatic install & create Desktop + Start Menu launcher:
-Double-click `install.bat` or run:
+Double-click `scripts\install.bat` or run:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
 Binary path:

@@ -9,16 +9,17 @@
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-Set-Location $scriptDir
+$rootDir = Split-Path -Parent $scriptDir
+Set-Location $rootDir
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "       LocalShot Windows Installer      " -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
 # 1. Locate or Build localshot.exe
-$releaseExe = Join-Path $scriptDir "target\release\localshot.exe"
-$debugExe   = Join-Path $scriptDir "target\debug\localshot.exe"
-$rootExe    = Join-Path $scriptDir "localshot.exe"
+$releaseExe = Join-Path $rootDir "target\release\localshot.exe"
+$debugExe   = Join-Path $rootDir "target\debug\localshot.exe"
+$rootExe    = Join-Path $rootDir "localshot.exe"
 
 $sourceExe = $null
 
@@ -60,9 +61,9 @@ if (-not $sourceExe -or -not (Test-Path $sourceExe)) {
 Write-Host "[+] Topilgan binary: $sourceExe" -ForegroundColor Green
 
 # 2. Icon tekshirish
-$iconSource = Join-Path $scriptDir "assets\icon.ico"
+$iconSource = Join-Path $rootDir "assets\icon.ico"
 if (-not (Test-Path $iconSource)) {
-    $makeIcon = Join-Path $scriptDir "assets\make_icon.ps1"
+    $makeIcon = Join-Path $scriptDir "make_icon.ps1"
     if (Test-Path $makeIcon) {
         Write-Host "[*] assets\icon.ico yaratilmoqda..." -ForegroundColor Yellow
         & powershell -ExecutionPolicy Bypass -File $makeIcon

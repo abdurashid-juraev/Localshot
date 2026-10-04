@@ -8,14 +8,15 @@
 
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-Set-Location $scriptDir
+$rootDir = Split-Path -Parent $scriptDir
+Set-Location $rootDir
 
 Write-Host "================================================" -ForegroundColor Cyan
 Write-Host "   LocalShot Professional Installer Yaratuvchi   " -ForegroundColor Cyan
 Write-Host "================================================" -ForegroundColor Cyan
 
 # 1. Binary tekshirish yoki yig'ish (Cargo build)
-$releaseExe = Join-Path $scriptDir "target\release\localshot.exe"
+$releaseExe = Join-Path $rootDir "target\release\localshot.exe"
 
 if (-not (Test-Path $releaseExe)) {
     Write-Host "`n[*] localshot.exe topilmadi. Cargo orqali yig'ish (build) tekshirilmoqda..." -ForegroundColor Yellow
@@ -50,10 +51,10 @@ if (-not (Test-Path $releaseExe)) {
 Write-Host "[+] Binary tayyor: $releaseExe" -ForegroundColor Green
 
 # 2. Icon mavjudligini tekshirish
-$iconPath = Join-Path $scriptDir "assets\icon.ico"
+$iconPath = Join-Path $rootDir "assets\icon.ico"
 if (-not (Test-Path $iconPath)) {
     Write-Host "[*] assets\icon.ico yaratilmoqda..." -ForegroundColor Yellow
-    & powershell -ExecutionPolicy Bypass -File (Join-Path $scriptDir "assets\make_icon.ps1")
+    & powershell -ExecutionPolicy Bypass -File (Join-Path $scriptDir "make_icon.ps1")
 }
 
 # 3. Inno Setup (ISCC.exe) tekshirish
@@ -112,7 +113,7 @@ Write-Host "`n[*] Professional Setup.exe yaratilmoqda..." -ForegroundColor Cyan
 $issFile = Join-Path $scriptDir "installer.iss"
 & "$isccPath" "$issFile"
 
-$distDir = Join-Path $scriptDir "dist"
+$distDir = Join-Path $rootDir "dist"
 $setupItem = Get-ChildItem -Path $distDir -Filter "LocalShot-Setup-*.exe" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 $setupExe = if ($setupItem) { $setupItem.FullName } else { $null }
 

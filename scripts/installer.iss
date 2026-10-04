@@ -18,6 +18,7 @@ DefaultDirName={autopf}\{#MyAppName}
 DisableProgramGroupPage=yes
 ; Allows user to choose between installing for current user or all users
 PrivilegesRequiredOverridesAllowed=commandline dialog
+SourceDir=..
 OutputDir=dist
 OutputBaseFilename=LocalShot-Setup-{#MyAppVersion}
 SetupIconFile=assets\icon.ico

@@ -105,14 +105,14 @@ jobs:
         shell: powershell
         run: |
           # Generate icons if needed
-          & powershell -ExecutionPolicy Bypass -File .\assets\make_icon.ps1
+          & powershell -ExecutionPolicy Bypass -File .\scripts\make_icon.ps1
           
           # Compile Inno Setup installer
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (Test-Path $iscc) {
-            & $iscc installer.iss
+            & $iscc scripts\installer.iss
           } else {
-            iscc installer.iss
+            iscc scripts\installer.iss
           }
 
           # Ensure dist folder exists and zip standalone binary
