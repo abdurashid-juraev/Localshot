@@ -14,6 +14,10 @@ component ResizeHandle inherits Rectangle {
     drop-shadow-color: #00000066;
 
     TouchArea {
+        x: -5px;
+        y: -5px;
+        width: 20px;
+        height: 20px;
         mouse-cursor: root.cursor;
         property <length> grab-x: 0px;
         property <length> grab-y: 0px;
@@ -208,6 +212,59 @@ export component OverlayWindow inherits Window {
         width: 100%;
         height: 100%;
         background: #00000080;
+    }
+
+    // Global Selection Drag Area (placed behind cutout viewport & resize handles)
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: crosshair;
+
+        property <length> origin-x: 0px;
+        property <length> origin-y: 0px;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                self.origin-x = self.mouse-x;
+                self.origin-y = self.mouse-y;
+                root.is-selecting = true;
+                root.has-selection = false;
+                root.sel-x = self.mouse-x;
+                root.sel-y = self.mouse-y;
+                root.sel-w = 0px;
+                root.sel-h = 0px;
+            } else if (event.kind == PointerEventKind.up) {
+                root.is-selecting = false;
+                if (root.sel-w > 10px && root.sel-h > 10px) {
+                    root.has-selection = true;
+                    root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
+                } else {
+                    root.has-selection = false;
+                }
+            }
+        }
+
+        moved => {
+            if (root.is-selecting) {
+                if (self.mouse-x >= self.origin-x) {
+                    root.sel-x = self.origin-x;
+                    root.sel-w = self.mouse-x - self.origin-x;
+                } else {
+                    root.sel-x = self.mouse-x;
+                    root.sel-w = self.origin-x - self.mouse-x;
+                }
+
+                if (self.mouse-y >= self.origin-y) {
+                    root.sel-y = self.origin-y;
+                    root.sel-h = self.mouse-y - self.origin-y;
+                } else {
+                    root.sel-y = self.mouse-y;
+                    root.sel-h = self.origin-y - self.mouse-y;
+                }
+
+                root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
+            }
+        }
     }
 
     // Cutout Viewport
@@ -418,57 +475,7 @@ export component OverlayWindow inherits Window {
         }
     }
 
-    // Global Selection Drag Area (active only when in "select" tool mode)
-    if !root.has-selection || root.active-tool == "select" : TouchArea {
-        width: 100%;
-        height: 100%;
 
-        property <length> origin-x: 0px;
-        property <length> origin-y: 0px;
-
-        pointer-event(event) => {
-            if (event.kind == PointerEventKind.down) {
-                self.origin-x = self.mouse-x;
-                self.origin-y = self.mouse-y;
-                root.is-selecting = true;
-                root.has-selection = false;
-                root.sel-x = self.mouse-x;
-                root.sel-y = self.mouse-y;
-                root.sel-w = 0px;
-                root.sel-h = 0px;
-            } else if (event.kind == PointerEventKind.up) {
-                root.is-selecting = false;
-                if (root.sel-w > 10px && root.sel-h > 10px) {
-                    root.has-selection = true;
-                    root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
-                } else {
-                    root.has-selection = false;
-                }
-            }
-        }
-
-        moved => {
-            if (root.is-selecting) {
-                if (self.mouse-x >= self.origin-x) {
-                    root.sel-x = self.origin-x;
-                    root.sel-w = self.mouse-x - self.origin-x;
-                } else {
-                    root.sel-x = self.mouse-x;
-                    root.sel-w = self.origin-x - self.mouse-x;
-                }
-
-                if (self.mouse-y >= self.origin-y) {
-                    root.sel-y = self.origin-y;
-                    root.sel-h = self.mouse-y - self.origin-y;
-                } else {
-                    root.sel-y = self.mouse-y;
-                    root.sel-h = self.origin-y - self.mouse-y;
-                }
-
-                root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
-            }
-        }
-    }
 
     // ==========================================
     // DUAL TOOLBAR (Lightshot 1:1 Floating Bars)
