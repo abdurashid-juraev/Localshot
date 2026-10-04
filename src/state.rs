@@ -71,12 +71,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn reset(&mut self, frame: CapturedFrame) {
-        self.original_frame = frame;
-        self.composited_cache = self.original_frame.img.clone();
-        self.selection = SelectionRect::default();
-        self.annotations.clear();
-        self.redo_stack.clear();
-        self.is_drawing = false;
+        *self = Self::new(frame);
     }
 
     pub fn new(frame: CapturedFrame) -> Self {

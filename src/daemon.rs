@@ -1,74 +1,194 @@
-use global_hotkey::{hotkey::{HotKey, Modifiers, Code}, GlobalHotKeyEvent, GlobalHotKeyManager};
-use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use single_instance::SingleInstance;
 use std::sync::Mutex;
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DaemonInitResult {
+    PrimaryInstance,
+    AlreadyRunningSignaled,
+}
 
 lazy_static::lazy_static! {
-    static ref SINGLE_INSTANCE: Mutex<Option<SingleInstance>> = Mutex::new(None);
-    static ref HOTKEY_MANAGER: Mutex<Option<GlobalHotKeyManager>> = Mutex::new(None);
-    static ref TRAY_ICON: Mutex<Option<TrayIcon>> = Mutex::new(None);
+    static ref CAPTURE_CALLBACK: Mutex<Option<Box<dyn Fn() + Send + Sync + 'static>>> = Mutex::new(None);
+    static ref QUIT_CALLBACK: Mutex<Option<Box<dyn Fn() + Send + Sync + 'static>>> = Mutex::new(None);
 }
 
-pub fn init_daemon() -> bool {
-    // 1. Single Instance check
-    let instance = SingleInstance::new("localshot_daemon_unique_id").unwrap();
-    if !instance.is_single() {
-        return false;
-    }
-    *SINGLE_INSTANCE.lock().unwrap() = Some(instance);
-
-    // 2. Global Hotkey (PrtScn and Ctrl+Alt+S)
-    if let Ok(manager) = GlobalHotKeyManager::new() {
-        let prtscn = HotKey::new(None, Code::PrintScreen);
-        let ctrl_alt_s = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyS);
-        let _ = manager.register(prtscn);
-        let _ = manager.register(ctrl_alt_s);
-        *HOTKEY_MANAGER.lock().unwrap() = Some(manager);
-    }
-
-    // 3. Tray Menu
-    let tray_menu = Menu::new();
-    let capture_i = MenuItem::new("Take Screenshot", true, None);
-    let quit_i = MenuItem::new("Quit LocalShot", true, None);
-    let _ = tray_menu.append_items(&[&capture_i, &PredefinedMenuItem::separator(), &quit_i]);
-
-    // Simple 16x16 blue square icon for the tray
-    let icon_rgba = vec![255; 16 * 16 * 4];
-    let icon = Icon::from_rgba(icon_rgba, 16, 16).unwrap();
-
-    let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(tray_menu))
-        .with_tooltip("LocalShot (PrtScn)")
-        .with_icon(icon)
-        .build()
-        .unwrap();
-
-    *TRAY_ICON.lock().unwrap() = Some(tray);
-
-    true
+pub fn set_capture_callback<F: Fn() + Send + Sync + 'static>(cb: F) {
+    *CAPTURE_CALLBACK.lock().unwrap() = Some(Box::new(cb));
 }
 
-pub fn spawn_background_worker<F>(mut on_capture: F) 
-where
-    F: FnMut() + Send + 'static,
-{
-    std::thread::spawn(move || {
-        loop {
-            if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-                if event.state == global_hotkey::HotKeyState::Released {
-                    on_capture();
-                }
-            }
+pub fn set_quit_callback<F: Fn() + Send + Sync + 'static>(cb: F) {
+    *QUIT_CALLBACK.lock().unwrap() = Some(Box::new(cb));
+}
 
-            if let Ok(event) = MenuEvent::receiver().try_recv() {
-                if event.id.0 == "Take Screenshot" {
-                    on_capture();
+#[allow(dead_code)]
+pub fn trigger_capture() {
+    if let Some(cb) = CAPTURE_CALLBACK.lock().unwrap().as_ref() {
+        cb();
+    }
+}
+
+#[allow(dead_code)]
+pub fn trigger_quit() {
+    if let Some(cb) = QUIT_CALLBACK.lock().unwrap().as_ref() {
+        cb();
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod windows_impl {
+    use super::*;
+    use global_hotkey::{
+        hotkey::{Code, HotKey, Modifiers},
+        GlobalHotKeyEvent, GlobalHotKeyManager,
+    };
+    use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use std::net::UdpSocket;
+    use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+
+    const IPC_PORT: u16 = 42135;
+
+    lazy_static::lazy_static! {
+        static ref HOTKEY_MANAGER: Mutex<Option<GlobalHotKeyManager>> = Mutex::new(None);
+        static ref TRAY_ICON: Mutex<Option<TrayIcon>> = Mutex::new(None);
+    }
+
+    fn generate_tray_icon() -> Icon {
+        let size = 32u32;
+        let mut rgba = vec![0u8; (size * size * 4) as usize];
+        for y in 0..size {
+            for x in 0..size {
+                let idx = ((y * size + x) * 4) as usize;
+                let fx = x as f32;
+                let fy = y as f32;
+                let cx = 15.5f32;
+                let cy = 15.5f32;
+                let dist_sq = (fx - cx).powi(2) + (fy - cy).powi(2);
+
+                let in_box = fx >= 2.0 && fx <= 29.0 && fy >= 2.0 && fy <= 29.0;
+                let corner_dist = if fx < 6.0 && fy < 6.0 {
+                    (fx - 6.0).powi(2) + (fy - 6.0).powi(2)
+                } else if fx > 25.0 && fy < 6.0 {
+                    (fx - 25.0).powi(2) + (fy - 6.0).powi(2)
+                } else if fx < 6.0 && fy > 25.0 {
+                    (fx - 6.0).powi(2) + (fy - 25.0).powi(2)
+                } else if fx > 25.0 && fy > 25.0 {
+                    (fx - 25.0).powi(2) + (fy - 25.0).powi(2)
                 } else {
-                    std::process::exit(0);
+                    0.0
+                };
+
+                if in_box && corner_dist <= 16.0 {
+                    let t = (fx + fy) / 60.0;
+                    let r = (79.0 * (1.0 - t) + 219.0 * t) as u8;
+                    let g = (70.0 * (1.0 - t) + 39.0 * t) as u8;
+                    let b = (229.0 * (1.0 - t) + 119.0 * t) as u8;
+                    rgba[idx] = r;
+                    rgba[idx + 1] = g;
+                    rgba[idx + 2] = b;
+                    rgba[idx + 3] = 255;
+
+                    if dist_sq <= 81.0 {
+                        rgba[idx] = 56;
+                        rgba[idx + 1] = 189;
+                        rgba[idx + 2] = 248;
+                        rgba[idx + 3] = 255;
+                    }
+                    if dist_sq <= 36.0 {
+                        rgba[idx] = 15;
+                        rgba[idx + 1] = 23;
+                        rgba[idx + 2] = 42;
+                        rgba[idx + 3] = 255;
+                    }
+                    if (fx - 13.0).powi(2) + (fy - 13.0).powi(2) <= 2.25 {
+                        rgba[idx] = 255;
+                        rgba[idx + 1] = 255;
+                        rgba[idx + 2] = 255;
+                        rgba[idx + 3] = 255;
+                    }
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-    });
+        Icon::from_rgba(rgba, size, size).unwrap()
+    }
+
+    pub fn check_or_signal_existing_instance() -> DaemonInitResult {
+        match UdpSocket::bind(("127.0.0.1", IPC_PORT)) {
+            Ok(socket) => {
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 8];
+                    while let Ok((_, _)) = socket.recv_from(&mut buf) {
+                        trigger_capture();
+                    }
+                });
+                DaemonInitResult::PrimaryInstance
+            }
+            Err(_) => {
+                if let Ok(sender) = UdpSocket::bind("127.0.0.1:0") {
+                    let _ = sender.send_to(b"SNAP", ("127.0.0.1", IPC_PORT));
+                }
+                DaemonInitResult::AlreadyRunningSignaled
+            }
+        }
+    }
+
+    pub fn init_daemon() -> bool {
+        // Register Global Hotkeys (PrintScreen and Ctrl+Alt+S)
+        if let Ok(manager) = GlobalHotKeyManager::new() {
+            let prtscn = HotKey::new(None, Code::PrintScreen);
+            let ctrl_alt_s = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyS);
+            let _ = manager.register(prtscn);
+            let _ = manager.register(ctrl_alt_s);
+            *HOTKEY_MANAGER.lock().unwrap() = Some(manager);
+        }
+
+        GlobalHotKeyEvent::set_event_handler(Some(|event| {
+            if event.state == global_hotkey::HotKeyState::Released {
+                trigger_capture();
+            }
+        }));
+
+        // Tray Menu & Icon
+        let tray_menu = Menu::new();
+        let capture_i = MenuItem::new("Take Screenshot (PrtScn)", true, None);
+        let quit_i = MenuItem::new("Quit LocalShot", true, None);
+        let _ = tray_menu.append_items(&[&capture_i, &PredefinedMenuItem::separator(), &quit_i]);
+
+        MenuEvent::set_event_handler(Some(|event| {
+            if event.id.0 == "Take Screenshot (PrtScn)" {
+                trigger_capture();
+            } else if event.id.0 == "Quit LocalShot" {
+                trigger_quit();
+            }
+        }));
+
+        let icon = generate_tray_icon();
+        if let Ok(tray) = TrayIconBuilder::new()
+            .with_menu(Box::new(tray_menu))
+            .with_tooltip("LocalShot (PrtScn)")
+            .with_icon(icon)
+            .build()
+        {
+            *TRAY_ICON.lock().unwrap() = Some(tray);
+        }
+
+        true
+    }
 }
+
+#[cfg(target_os = "windows")]
+pub use windows_impl::*;
+
+#[cfg(not(target_os = "windows"))]
+mod non_windows_impl {
+    use super::*;
+
+    pub fn check_or_signal_existing_instance() -> DaemonInitResult {
+        DaemonInitResult::PrimaryInstance
+    }
+
+    pub fn init_daemon() -> bool {
+        true
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub use non_windows_impl::*;

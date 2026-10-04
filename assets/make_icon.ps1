@@ -1,7 +1,11 @@
+param(
+    [string]$OutIcoPath = (Join-Path $PSScriptRoot "icon.ico")
+)
+
 Add-Type -AssemblyName System.Drawing
 
 function Create-LocalShotIcon {
-    param([string]$OutIcoPath)
+    param([string]$TargetIcoPath)
 
     $sizes = @(256, 64, 48, 32, 16)
     $pngBytesList = @()
@@ -76,7 +80,7 @@ function Create-LocalShotIcon {
     }
 
     # Build ICO file structure
-    $fs = [System.IO.File]::Create($OutIcoPath)
+    $fs = [System.IO.File]::Create($TargetIcoPath)
     $bw = New-Object System.IO.BinaryWriter($fs)
 
     # Header: Reserved (0), Type (1 = ICO), Count
@@ -115,7 +119,7 @@ function Create-LocalShotIcon {
     $bw.Flush()
     $bw.Close()
     $fs.Close()
-    Write-Output "ICO successfully created at $OutIcoPath"
+    Write-Output "ICO successfully created at $TargetIcoPath"
 }
 
-Create-LocalShotIcon -OutIcoPath "c:\Users\abdurashid_jorayev\Desktop\draft\Localshot\assets\icon.ico"
+Create-LocalShotIcon -TargetIcoPath $OutIcoPath

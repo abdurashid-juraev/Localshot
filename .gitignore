@@ -9,10 +9,16 @@ Desktop.ini
 # IDE and Editor specific files
 .idea/
 .vscode/
+.vs/
 *.swp
 *.swo
 *~
 *.iml
+*.slnx.sqlite
+
+# Build and distribution artifacts
+/dist/
+*.exe
 
 # Internal planning & AI task instructions
 task.md

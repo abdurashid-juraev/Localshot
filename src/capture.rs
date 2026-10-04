@@ -3,6 +3,7 @@ use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use std::error::Error;
 use xcap::Monitor;
 
+#[allow(dead_code)]
 pub struct CapturedFrame {
     pub raw_image: RgbaImage,
     pub slint_image: Image,
