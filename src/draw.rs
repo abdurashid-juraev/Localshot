@@ -414,10 +414,11 @@ fn apply_pixelation(
                 }
             }
 
-            if count > 0 {
-                let avg_r = (sum_r / count) as u8;
-                let avg_g = (sum_g / count) as u8;
-                let avg_b = (sum_b / count) as u8;
+            if let Some(nonzero_count) = std::num::NonZeroU64::new(count) {
+                let div = nonzero_count.get();
+                let avg_r = (sum_r / div) as u8;
+                let avg_g = (sum_g / div) as u8;
+                let avg_b = (sum_b / div) as u8;
                 let avg_color = Rgba([avg_r, avg_g, avg_b, 255]);
 
                 for y in by..(by + cur_h) {
@@ -503,6 +504,7 @@ fn draw_marker(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mark_circle_mask(
     mask: &mut [bool],
     origin_x: u32,
@@ -530,6 +532,7 @@ fn mark_circle_mask(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mark_line_mask(
     mask: &mut [bool],
     origin_x: u32,

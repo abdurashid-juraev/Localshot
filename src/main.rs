@@ -276,8 +276,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(cropped) = crop {
                 let dialog = rfd::FileDialog::new()
                     .set_title("Save Screenshot As")
-                    .set_directory(&config::default_save_dir())
-                    .set_file_name(&config::default_filename())
+                    .set_directory(config::default_save_dir())
+                    .set_file_name(config::default_filename())
                     .add_filter("PNG Image (*.png)", &["png"]);
 
                 if let Some(target_path) = dialog.save_file() {

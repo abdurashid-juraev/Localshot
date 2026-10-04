@@ -86,12 +86,6 @@ pub fn default_filename() -> String {
     format!("LocalShot_{}.png", formatted_time)
 }
 
-/// Resolves the destination filepath for saving a screenshot.
-#[allow(dead_code)]
-pub fn resolve_save_filepath() -> PathBuf {
-    default_save_dir().join(default_filename())
-}
-
 /// Simple zero-dependency UTC timestamp formatter
 fn format_timestamp_utc(epoch_secs: u64) -> String {
     let sec_in_day = 86400;
@@ -139,13 +133,6 @@ mod tests {
         assert_eq!(format_timestamp_utc(0), "1970-01-01_000000");
         // A known epoch: 1727471736 -> 2024-09-27 21:15:36
         assert_eq!(format_timestamp_utc(1727471736), "2024-09-27_211536");
-    }
-
-    #[test]
-    fn test_save_filepath_resolution() {
-        let path = resolve_save_filepath();
-        assert!(path.to_str().unwrap().contains("LocalShot_"));
-        assert!(path.extension().map_or(false, |ext| ext == "png"));
     }
 }
 

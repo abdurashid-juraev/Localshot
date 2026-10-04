@@ -15,7 +15,6 @@ zeroize = { version = "1.8", features = ["alloc"] }
 dirs = "6.0"
 rfd = "0.15"
 lazy_static = "1.5.0"
-single-instance = "0.3.3"
 
 [target.'cfg(windows)'.dependencies]
 global-hotkey = "0.8.0"

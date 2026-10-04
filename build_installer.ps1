@@ -113,9 +113,10 @@ $issFile = Join-Path $scriptDir "installer.iss"
 & "$isccPath" "$issFile"
 
 $distDir = Join-Path $scriptDir "dist"
-$setupExe = Join-Path $distDir "LocalShot-Setup-0.1.0.exe"
+$setupItem = Get-ChildItem -Path $distDir -Filter "LocalShot-Setup-*.exe" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$setupExe = if ($setupItem) { $setupItem.FullName } else { $null }
 
-if (Test-Path $setupExe) {
+if ($setupExe -and (Test-Path $setupExe)) {
     Write-Host "`n================================================" -ForegroundColor Green
     Write-Host "   PROFESSIONAL INSTALLER TAYYOR BO'LDI!       " -ForegroundColor Green
     Write-Host "================================================" -ForegroundColor Green

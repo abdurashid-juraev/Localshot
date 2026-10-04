@@ -24,7 +24,7 @@ A 100% offline, privacy-first, 1:1 Lightshot clone built in high-performance **R
     - ➡️ **Arrow**: Straight shaft with calculated directional arrowhead.
     - 🔲 **Rectangle**: Vector stroke bounding box.
     - 🖍️ **Marker**: Semi-transparent highlighter with 35% alpha blend.
-    - ⬛ **Redact / Blur**: Instant 8x8 average pixelation mosaic to censor sensitive credentials or personal info.
+    - ⬛ **Redact / Blur**: Instant 10x10 average pixelation mosaic to censor sensitive credentials or personal info.
     - 🎨 **Palette**: 6 primary colors (Red, Blue, Green, Yellow, White, Black).
     - ↩️ **Undo**: Step-by-step undo stack.
   - **Horizontal Toolbar (Action Controls)**:
