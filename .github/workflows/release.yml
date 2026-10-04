@@ -97,7 +97,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build Release Binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release
 
       # Windows Artifact Packaging & Inno Setup Installer Build
       - name: Build Windows Installer & Zip
@@ -115,15 +115,16 @@ jobs:
             iscc installer.iss
           }
 
-          # Zip standalone binary
-          Compress-Archive -Path target\${{ matrix.target }}\release\localshot.exe -DestinationPath dist\localshot-windows-x86_64.zip
+          # Ensure dist folder exists and zip standalone binary
+          if (-not (Test-Path dist)) { New-Item -ItemType Directory -Path dist | Out-Null }
+          Compress-Archive -Path target\release\localshot.exe -DestinationPath dist\localshot-windows-x86_64.zip
 
       # Linux Artifact Packaging
       - name: Build Linux Archive
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist
-          tar -czvf dist/localshot-linux-x86_64.tar.gz -C target/${{ matrix.target }}/release localshot
+          tar -czvf dist/localshot-linux-x86_64.tar.gz -C target/release localshot
 
       - name: Upload Artifacts to GitHub Release
         uses: softprops/action-gh-release@v2

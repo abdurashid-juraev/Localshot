@@ -46,9 +46,9 @@ mod windows_impl {
 
     const IPC_PORT: u16 = 42135;
 
-    lazy_static::lazy_static! {
-        static ref HOTKEY_MANAGER: Mutex<Option<GlobalHotKeyManager>> = Mutex::new(None);
-        static ref TRAY_ICON: Mutex<Option<TrayIcon>> = Mutex::new(None);
+    pub struct DaemonState {
+        pub _hotkey_manager: Option<GlobalHotKeyManager>,
+        pub _tray_icon: Option<TrayIcon>,
     }
 
     fn generate_tray_icon() -> Icon {
@@ -130,17 +130,19 @@ mod windows_impl {
         }
     }
 
-    pub fn init_daemon() -> bool {
+    pub fn init_daemon() -> DaemonState {
         // Register Global Hotkeys (PrintScreen and Ctrl+Alt+S)
-        if let Ok(manager) = GlobalHotKeyManager::new() {
+        let hotkey_manager = if let Ok(manager) = GlobalHotKeyManager::new() {
             let prtscn = HotKey::new(None, Code::PrintScreen);
             let ctrl_alt_s = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyS);
             let _ = manager.register(prtscn);
             let _ = manager.register(ctrl_alt_s);
-            *HOTKEY_MANAGER.lock().unwrap() = Some(manager);
-        }
+            Some(manager)
+        } else {
+            None
+        };
 
-        GlobalHotKeyEvent::set_event_handler(Some(|event| {
+        GlobalHotKeyEvent::set_event_handler(Some(|event: GlobalHotKeyEvent| {
             if event.state == global_hotkey::HotKeyState::Released {
                 trigger_capture();
             }
@@ -152,25 +154,29 @@ mod windows_impl {
         let quit_i = MenuItem::new("Quit LocalShot", true, None);
         let _ = tray_menu.append_items(&[&capture_i, &PredefinedMenuItem::separator(), &quit_i]);
 
-        MenuEvent::set_event_handler(Some(|event| {
-            if event.id.0 == "Take Screenshot (PrtScn)" {
+        let capture_id = capture_i.id().clone();
+        let quit_id = quit_i.id().clone();
+
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+            if event.id == capture_id {
                 trigger_capture();
-            } else if event.id.0 == "Quit LocalShot" {
+            } else if event.id == quit_id {
                 trigger_quit();
             }
         }));
 
         let icon = generate_tray_icon();
-        if let Ok(tray) = TrayIconBuilder::new()
+        let tray_icon = TrayIconBuilder::new()
             .with_menu(Box::new(tray_menu))
             .with_tooltip("LocalShot (PrtScn)")
             .with_icon(icon)
             .build()
-        {
-            *TRAY_ICON.lock().unwrap() = Some(tray);
-        }
+            .ok();
 
-        true
+        DaemonState {
+            _hotkey_manager: hotkey_manager,
+            _tray_icon: tray_icon,
+        }
     }
 }
 
@@ -181,12 +187,14 @@ pub use windows_impl::*;
 mod non_windows_impl {
     use super::*;
 
+    pub struct DaemonState;
+
     pub fn check_or_signal_existing_instance() -> DaemonInitResult {
         DaemonInitResult::PrimaryInstance
     }
 
-    pub fn init_daemon() -> bool {
-        true
+    pub fn init_daemon() -> DaemonState {
+        DaemonState
     }
 }
 

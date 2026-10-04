@@ -104,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_daemon_mode = std::env::args().any(|a| a == "--daemon" || a == "--background");
     let is_windows = cfg!(target_os = "windows");
 
-    daemon::init_daemon();
+    let _daemon_state = daemon::init_daemon();
 
     let overlay = OverlayWindow::new()?;
     let state_lock = Arc::new(Mutex::new(None));
