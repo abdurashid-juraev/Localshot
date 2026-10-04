@@ -6,10 +6,9 @@ pub enum DaemonInitResult {
     AlreadyRunningSignaled,
 }
 
-lazy_static::lazy_static! {
-    static ref CAPTURE_CALLBACK: Mutex<Option<Box<dyn Fn() + Send + Sync + 'static>>> = Mutex::new(None);
-    static ref QUIT_CALLBACK: Mutex<Option<Box<dyn Fn() + Send + Sync + 'static>>> = Mutex::new(None);
-}
+type DaemonCallback = Box<dyn Fn() + Send + Sync + 'static>;
+static CAPTURE_CALLBACK: Mutex<Option<DaemonCallback>> = Mutex::new(None);
+static QUIT_CALLBACK: Mutex<Option<DaemonCallback>> = Mutex::new(None);
 
 pub fn set_capture_callback<F: Fn() + Send + Sync + 'static>(cb: F) {
     *CAPTURE_CALLBACK.lock().unwrap() = Some(Box::new(cb));
@@ -68,6 +67,13 @@ mod windows_impl {
     pub struct DaemonState {
         pub _hotkey_manager: Option<GlobalHotKeyManager>,
         pub _tray_icon: Option<TrayIcon>,
+    }
+
+    fn load_tray_icon() -> Icon {
+        if let Ok(icon) = Icon::from_resource(1, Some((32, 32))) {
+            return icon;
+        }
+        generate_tray_icon()
     }
 
     fn generate_tray_icon() -> Icon {
@@ -164,7 +170,7 @@ mod windows_impl {
             }
         }));
 
-        let icon = generate_tray_icon();
+        let icon = load_tray_icon();
         let tray_icon = TrayIconBuilder::new()
             .with_menu(Box::new(tray_menu))
             .with_tooltip("LocalShot (PrtScn)")

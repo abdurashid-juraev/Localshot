@@ -227,7 +227,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(ann) = state.build_current_annotation((abs_x, abs_y)) {
                     state.commit_annotation(ann);
                     state.finish_drawing();
-                    sync_overlay(&overlay_weak, &state.composited_cache);
+                    sync_overlay(&overlay_weak, state.composited_image());
                 } else {
                     state.finish_drawing();
                 }
@@ -243,24 +243,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut guard = state_lock.lock().unwrap();
             if let Some(state) = guard.as_mut() {
                 if state.undo() {
-                    sync_overlay(&overlay_weak, &state.composited_cache);
+                    sync_overlay(&overlay_weak, state.composited_image());
                 }
             }
         });
     }
 
-    // Copy action (Ctrl+C, Enter or Copy button)
-    {
-        let state_lock = state_lock.clone();
+    // Helper closure to dismiss overlay, sanitize state, and exit event loop if needed
+    let dismiss = {
         let overlay_weak = overlay_weak.clone();
-        overlay.on_copy_requested(move || {
-            let crop = {
-                let guard = state_lock.lock().unwrap();
-                guard.as_ref().and_then(|s| s.get_final_crop())
-            };
-            if let Some(cropped) = crop {
-                let _ = SystemClipboard.copy_image(&cropped);
-            }
+        let state_lock = state_lock.clone();
+        move || {
             if let Some(overlay) = overlay_weak.upgrade() {
                 let _ = overlay.hide();
             }
@@ -270,13 +263,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !is_windows {
                 let _ = slint::quit_event_loop();
             }
+        }
+    };
+
+    // Copy action (Ctrl+C, Enter or Copy button)
+    {
+        let state_lock = state_lock.clone();
+        let dismiss = dismiss.clone();
+        overlay.on_copy_requested(move || {
+            let crop = {
+                let guard = state_lock.lock().unwrap();
+                guard.as_ref().and_then(|s| s.get_final_crop())
+            };
+            if let Some(cropped) = crop {
+                let _ = SystemClipboard.copy_image(&cropped);
+            }
+            dismiss();
         });
     }
 
     // Save action (Ctrl+S or Save button)
     {
         let state_lock = state_lock.clone();
-        let overlay_weak = overlay_weak.clone();
+        let dismiss = dismiss.clone();
         overlay.on_save_requested(move || {
             let crop = {
                 let guard = state_lock.lock().unwrap();
@@ -291,15 +300,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if let Some(target_path) = dialog.save_file() {
                     let _ = cropped.save(&target_path);
-                    if let Some(overlay) = overlay_weak.upgrade() {
-                        let _ = overlay.hide();
-                    }
-                    if let Some(state) = state_lock.lock().unwrap().as_mut() {
-                        state.sanitize();
-                    }
-                    if !is_windows {
-                        let _ = slint::quit_event_loop();
-                    }
+                    dismiss();
                 }
             }
         });
@@ -307,18 +308,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Close action (Esc or Close button)
     {
-        let state_lock = state_lock.clone();
-        let overlay_weak = overlay_weak.clone();
         overlay.on_close_requested(move || {
-            if let Some(overlay) = overlay_weak.upgrade() {
-                let _ = overlay.hide();
-            }
-            if let Some(state) = state_lock.lock().unwrap().as_mut() {
-                state.sanitize();
-            }
-            if !is_windows {
-                let _ = slint::quit_event_loop();
-            }
+            dismiss();
         });
     }
 

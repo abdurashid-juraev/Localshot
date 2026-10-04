@@ -34,8 +34,8 @@ cp "$DIR/assets/icon.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/locals
 
 # Copy desktop entries
 echo "🖥️ Creating desktop launchers..."
-sed "s|\$HOME|$HOME|g" "$DIR/assets/localshot.desktop" > "$HOME/.local/share/applications/localshot.desktop"
-cp "$HOME/.local/share/applications/localshot.desktop" "$HOME/Desktop/LocalShot.desktop"
+cp "$DIR/assets/localshot.desktop" "$HOME/.local/share/applications/localshot.desktop"
+cp "$DIR/assets/localshot.desktop" "$HOME/Desktop/LocalShot.desktop"
 
 chmod +x "$HOME/.local/share/applications/localshot.desktop"
 chmod +x "$HOME/Desktop/LocalShot.desktop"

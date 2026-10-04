@@ -80,6 +80,22 @@ pub enum Annotation {
     },
 }
 
+/// Computes dirty bounding coordinates for a slice of 2D points with radius padding
+#[inline]
+fn compute_points_bounds(points: &[(i32, i32)], radius: i32) -> (i32, i32, i32, i32) {
+    let mut min_x = i32::MAX;
+    let mut min_y = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut max_y = i32::MIN;
+    for &(px, py) in points {
+        min_x = min_x.min(px - radius);
+        min_y = min_y.min(py - radius);
+        max_x = max_x.max(px + radius);
+        max_y = max_y.max(py + radius);
+    }
+    (min_x, min_y, max_x, max_y)
+}
+
 impl Annotation {
     /// Applies this annotation onto the given canvas buffer.
     pub fn apply(&self, canvas: &mut RgbaImage) {
@@ -147,19 +163,12 @@ impl Annotation {
         let (min_x, min_y, max_x, max_y) = match self {
             Annotation::Stroke {
                 points, thickness, ..
+            }
+            | Annotation::Marker {
+                points, thickness, ..
             } => {
                 let r = (*thickness / 2).max(1) + 2;
-                let mut x0 = i32::MAX;
-                let mut y0 = i32::MAX;
-                let mut x1 = i32::MIN;
-                let mut y1 = i32::MIN;
-                for &(px, py) in points {
-                    x0 = x0.min(px - r);
-                    y0 = y0.min(py - r);
-                    x1 = x1.max(px + r);
-                    y1 = y1.max(py + r);
-                }
-                (x0, y0, x1, y1)
+                compute_points_bounds(points, r)
             }
             Annotation::Line {
                 start,
@@ -199,22 +208,6 @@ impl Annotation {
             } => {
                 let pad = (*thickness).max(2) + 2;
                 (*x - pad, *y - pad, *x + *w + pad, *y + *h + pad)
-            }
-            Annotation::Marker {
-                points, thickness, ..
-            } => {
-                let r = (*thickness / 2).max(1) + 2;
-                let mut x0 = i32::MAX;
-                let mut y0 = i32::MAX;
-                let mut x1 = i32::MIN;
-                let mut y1 = i32::MIN;
-                for &(px, py) in points {
-                    x0 = x0.min(px - r);
-                    y0 = y0.min(py - r);
-                    x1 = x1.max(px + r);
-                    y1 = y1.max(py + r);
-                }
-                (x0, y0, x1, y1)
             }
             Annotation::Redact { x, y, w, h, .. } => (*x, *y, *x + *w, *y + *h),
         };
@@ -431,14 +424,23 @@ fn apply_pixelation(
     }
 }
 
-/// Copies a sub-rectangle of pixels from src into dst without allocating new buffers.
+/// Copies a sub-rectangle of pixels from src into dst using fast SIMD row-wise slice copy without allocating.
 pub fn copy_rect(src: &RgbaImage, dst: &mut RgbaImage, x: u32, y: u32, w: u32, h: u32) {
     let max_x = (x + w).min(src.width()).min(dst.width());
     let max_y = (y + h).min(src.height()).min(dst.height());
+    if x >= max_x || y >= max_y {
+        return;
+    }
+    let row_bytes = ((max_x - x) * 4) as usize;
+    let src_stride = (src.width() * 4) as usize;
+    let dst_stride = (dst.width() * 4) as usize;
+    let src_raw = src.as_raw();
+    let dst_raw = dst.as_mut();
+
     for py in y..max_y {
-        for px in x..max_x {
-            dst.put_pixel(px, py, *src.get_pixel(px, py));
-        }
+        let src_idx = py as usize * src_stride + (x * 4) as usize;
+        let dst_idx = py as usize * dst_stride + (x * 4) as usize;
+        dst_raw[dst_idx..dst_idx + row_bytes].copy_from_slice(&src_raw[src_idx..src_idx + row_bytes]);
     }
 }
 
@@ -456,17 +458,7 @@ fn draw_marker(
     let radius = (thickness / 2).max(1);
     let (img_w, img_h) = canvas.dimensions();
 
-    let mut min_x = i32::MAX;
-    let mut min_y = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut max_y = i32::MIN;
-
-    for &(px, py) in points {
-        min_x = min_x.min(px - radius);
-        min_y = min_y.min(py - radius);
-        max_x = max_x.max(px + radius);
-        max_y = max_y.max(py + radius);
-    }
+    let (min_x, min_y, max_x, max_y) = compute_points_bounds(points, radius);
 
     let x0 = min_x.clamp(0, img_w as i32 - 1) as u32;
     let y0 = min_y.clamp(0, img_h as i32 - 1) as u32;

@@ -3199,7 +3199,6 @@ dependencies = [
  "dirs 6.0.0",
  "global-hotkey",
  "image",
- "lazy_static",
  "muda 0.20.0",
  "rfd",
  "slint",

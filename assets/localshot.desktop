@@ -2,8 +2,8 @@
 Name=LocalShot
 GenericName=Screenshot Tool
 Comment=100% Offline Privacy-First Lightshot Clone
-Exec=$HOME/.local/bin/localshot
-Icon=$HOME/.local/share/icons/localshot.svg
+Exec=sh -c 'exec "$HOME/.local/bin/localshot"'
+Icon=localshot
 Terminal=false
 Type=Application
 Categories=Utility;Graphics;Photography;

@@ -54,10 +54,10 @@ impl SelectionRect {
 pub struct AppState {
     /// Pristine desktop capture untouched in RAM
     pub raw_base: RgbaImage,
-    /// Cached base including all committed annotations for O(1) live preview rendering
-    pub composited_cache: RgbaImage,
-    /// Reusable live preview buffer to eliminate O(N) allocation churn during mouse dragging
-    pub live_preview: RgbaImage,
+    /// Cached base including all committed annotations (allocated lazily on first annotation)
+    pub composited_cache: Option<RgbaImage>,
+    /// Reusable live preview buffer to eliminate O(N) allocation churn (allocated lazily on first drawing)
+    pub live_preview: Option<RgbaImage>,
     /// Dirty bounding box of the active live preview annotation
     pub live_dirty_rect: Option<(u32, u32, u32, u32)>,
     /// Stack of applied annotations for undo support
@@ -69,18 +69,28 @@ pub struct AppState {
     pub current_points: Vec<(i32, i32)>,
 }
 
+/// Helper to normalize start and end points into top-left (x, y) and positive dimensions (w, h)
+#[inline]
+fn normalize_rect_coords(start: (i32, i32), end: (i32, i32)) -> (i32, i32, i32, i32) {
+    (
+        start.0.min(end.0),
+        start.1.min(end.1),
+        (end.0 - start.0).abs(),
+        (end.1 - start.1).abs(),
+    )
+}
+
 impl AppState {
     pub fn reset(&mut self, frame: CapturedFrame) {
         *self = Self::new(frame);
     }
 
+    /// Zero-cost initialization: eliminates eager 66MB duplicate buffer cloning
     pub fn new(frame: CapturedFrame) -> Self {
-        let composited = frame.raw_image.clone();
-        let preview = composited.clone();
         Self {
             raw_base: frame.raw_image,
-            composited_cache: composited,
-            live_preview: preview,
+            composited_cache: None,
+            live_preview: None,
             live_dirty_rect: None,
             annotations: Vec::new(),
             tool: Tool::Select,
@@ -94,8 +104,35 @@ impl AppState {
     /// Explicitly zeroizes all volatile image buffers from RAM (Zero disk & RAM residue)
     pub fn sanitize(&mut self) {
         self.raw_base.as_mut().zeroize();
-        self.composited_cache.as_mut().zeroize();
-        self.live_preview.as_mut().zeroize();
+        if let Some(cache) = self.composited_cache.as_mut() {
+            cache.as_mut().zeroize();
+        }
+        if let Some(preview) = self.live_preview.as_mut() {
+            preview.as_mut().zeroize();
+        }
+    }
+
+    /// Returns a reference to the active composited image (or pristine base if no annotations)
+    #[inline]
+    pub fn composited_image(&self) -> &RgbaImage {
+        self.composited_cache.as_ref().unwrap_or(&self.raw_base)
+    }
+
+    /// Lazily ensures the composited cache buffer is allocated
+    fn ensure_composited(&mut self) -> &mut RgbaImage {
+        if self.composited_cache.is_none() {
+            self.composited_cache = Some(self.raw_base.clone());
+        }
+        self.composited_cache.as_mut().unwrap()
+    }
+
+    /// Lazily ensures the live preview buffer is allocated
+    fn ensure_live_preview(&mut self) -> &mut RgbaImage {
+        if self.live_preview.is_none() {
+            let base = self.composited_image();
+            self.live_preview = Some(base.clone());
+        }
+        self.live_preview.as_mut().unwrap()
     }
 
     pub fn active_color(&self) -> [u8; 4] {
@@ -149,10 +186,7 @@ impl AppState {
                 thickness: config::ARROW_THICKNESS,
             }),
             Tool::Rectangle => {
-                let x = start.0.min(end_pt.0);
-                let y = start.1.min(end_pt.1);
-                let w = (end_pt.0 - start.0).abs();
-                let h = (end_pt.1 - start.1).abs();
+                let (x, y, w, h) = normalize_rect_coords(start, end_pt);
                 Some(Annotation::Rectangle {
                     x,
                     y,
@@ -168,10 +202,7 @@ impl AppState {
                 thickness: config::MARKER_THICKNESS,
             }),
             Tool::Redact => {
-                let x = start.0.min(end_pt.0);
-                let y = start.1.min(end_pt.1);
-                let w = (end_pt.0 - start.0).abs();
-                let h = (end_pt.1 - start.1).abs();
+                let (x, y, w, h) = normalize_rect_coords(start, end_pt);
                 Some(Annotation::Redact {
                     x,
                     y,
@@ -186,11 +217,14 @@ impl AppState {
 
     /// Commits an annotation to history and directly updates the cached composited buffer.
     pub fn commit_annotation(&mut self, ann: Annotation) {
-        ann.apply(&mut self.composited_cache);
+        let composited = self.ensure_composited();
+        ann.apply(composited);
         self.annotations.push(ann);
         // Sync live_preview by restoring dirty rect
         if let Some((rx, ry, rw, rh)) = self.live_dirty_rect.take() {
-            draw::copy_rect(&self.composited_cache, &mut self.live_preview, rx, ry, rw, rh);
+            if let (Some(cache), Some(preview)) = (&self.composited_cache, &mut self.live_preview) {
+                draw::copy_rect(cache, preview, rx, ry, rw, rh);
+            }
         }
     }
 
@@ -203,8 +237,14 @@ impl AppState {
     /// Undoes the last annotation and rebuilds the composited cache from the pristine raw base.
     pub fn undo(&mut self) -> bool {
         if self.annotations.pop().is_some() {
-            self.composited_cache = draw::render_annotations(&self.raw_base, &self.annotations);
-            self.live_preview = self.composited_cache.clone();
+            if self.annotations.is_empty() {
+                self.composited_cache = None;
+                self.live_preview = None;
+            } else {
+                let cache = draw::render_annotations(&self.raw_base, &self.annotations);
+                self.live_preview = Some(cache.clone());
+                self.composited_cache = Some(cache);
+            }
             self.live_dirty_rect = None;
             true
         } else {
@@ -215,26 +255,30 @@ impl AppState {
     /// Renders a fast preview by restoring the dirty rectangle and applying the live annotation.
     /// Eliminates full 4K frame cloning on every mouse move.
     pub fn render_preview(&mut self, live_ann: Option<&Annotation>) -> &RgbaImage {
+        self.ensure_composited();
+        self.ensure_live_preview();
+
         if let Some((rx, ry, rw, rh)) = self.live_dirty_rect.take() {
-            draw::copy_rect(&self.composited_cache, &mut self.live_preview, rx, ry, rw, rh);
+            if let (Some(cache), Some(preview)) = (&self.composited_cache, &mut self.live_preview) {
+                draw::copy_rect(cache, preview, rx, ry, rw, rh);
+            }
         }
 
         if let Some(ann) = live_ann {
-            ann.apply(&mut self.live_preview);
-            let bbox = ann.bounding_box(self.live_preview.width(), self.live_preview.height());
+            let preview = self.live_preview.as_mut().unwrap();
+            ann.apply(preview);
+            let bbox = ann.bounding_box(preview.width(), preview.height());
             self.live_dirty_rect = Some(bbox);
         }
 
-        &self.live_preview
+        self.live_preview.as_ref().unwrap()
     }
 
     /// Produces the final composited and cropped image bounded by the active selection.
     pub fn get_final_crop(&self) -> Option<RgbaImage> {
-        let (cx, cy, cw, ch) = self.selection.crop_bounds(
-            self.composited_cache.width(),
-            self.composited_cache.height(),
-        )?;
-        Some(image::imageops::crop_imm(&self.composited_cache, cx, cy, cw, ch).to_image())
+        let img = self.composited_image();
+        let (cx, cy, cw, ch) = self.selection.crop_bounds(img.width(), img.height())?;
+        Some(image::imageops::crop_imm(img, cx, cy, cw, ch).to_image())
     }
 }
 
@@ -284,6 +328,9 @@ mod tests {
         let frame = create_dummy_frame(200, 200);
         let mut state = AppState::new(frame);
 
+        // Verify lazy zero-allocation initialization
+        assert!(state.composited_cache.is_none());
+        assert!(state.live_preview.is_none());
         assert_eq!(state.tool, Tool::Select);
         assert_eq!(state.annotations.len(), 0);
 
@@ -297,6 +344,7 @@ mod tests {
         state.commit_annotation(ann.unwrap());
         state.finish_drawing();
         assert_eq!(state.annotations.len(), 1);
+        assert!(state.composited_cache.is_some());
 
         // Preview should work without allocation
         let preview = state.render_preview(None);
@@ -311,6 +359,9 @@ mod tests {
         // Test undo
         assert!(state.undo());
         assert_eq!(state.annotations.len(), 0);
+        // Buffers should be freed after full undo
+        assert!(state.composited_cache.is_none());
+        assert!(state.live_preview.is_none());
         assert!(!state.undo()); // Nothing left to undo
     }
 }

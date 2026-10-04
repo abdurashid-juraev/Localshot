@@ -14,7 +14,13 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 zeroize = { version = "1.8", features = ["alloc"] }
 dirs = "6.0"
 rfd = "0.15"
-lazy_static = "1.5.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
 
 [target.'cfg(windows)'.dependencies]
 global-hotkey = "0.8.0"
