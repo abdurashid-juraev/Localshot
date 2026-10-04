@@ -43,7 +43,7 @@ component ResizeHandle inherits Rectangle {
 }
 
 component ToolButton inherits Rectangle {
-    in property <string> text-icon;
+    in property <image> icon;
     in property <string> tooltip-title;
     in property <string> tooltip-shortcut: "";
     in property <string> tooltip-side: "left"; // "left", "top", "right"
@@ -61,12 +61,11 @@ component ToolButton inherits Rectangle {
     border-color: root.active ? #60a5fa : (touch.has-hover ? #ffffff33 : transparent);
     border-width: 1px;
 
-    Text {
-        text: root.text-icon;
-        font-family: "Segoe UI Emoji";
-        font-size: 19px;
-        font-weight: 700;
-        color: root.active ? #ffffff : (touch.has-hover ? root.hover-icon-color : root.custom-icon-color);
+    Image {
+        source: root.icon;
+        width: 18px;
+        height: 18px;
+        colorize: root.active ? #ffffff : (touch.has-hover ? root.hover-icon-color : root.custom-icon-color);
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -131,16 +130,20 @@ component ColorDot inherits Rectangle {
     in property <bool> is-active: false;
     callback clicked();
 
-    width: 22px;
-    height: 22px;
-    border-radius: 11px;
+    width: 16px;
+    height: 16px;
+    border-radius: 8px;
     background: root.dot-color;
     border-color: root.is-active ? #ffffff : (dot-touch.has-hover ? #ffffffbb : #00000066);
-    border-width: root.is-active ? 2.5px : 1.5px;
-    drop-shadow-blur: root.is-active ? 6px : 0px;
-    drop-shadow-color: #ffffff66;
+    border-width: root.is-active ? 2px : 1.2px;
+    drop-shadow-blur: root.is-active ? 5px : 0px;
+    drop-shadow-color: #ffffff88;
 
     dot-touch := TouchArea {
+        x: -3px;
+        y: -3px;
+        width: 22px;
+        height: 22px;
         clicked => { root.clicked(); }
     }
 
@@ -487,10 +490,10 @@ export component OverlayWindow inherits Window {
 
         // --- VERTICAL TOOLBAR (Right of Selection) ---
         Rectangle {
-            x: (parent.right-edge + 52px <= root.width) ? parent.right-edge + 8px : parent.right-edge - 54px;
-            y: (root.sel-y + 390px <= root.height) ? root.sel-y : (root.height - 396px > 8px ? root.height - 396px : 8px);
-            width: 46px;
-            height: 384px;
+            x: (parent.right-edge + 56px <= root.width) ? parent.right-edge + 8px : parent.right-edge - 56px;
+            y: (root.sel-y + 374px <= root.height) ? root.sel-y : (root.height - 380px > 8px ? root.height - 380px : 8px);
+            width: 48px;
+            height: 368px;
             background: #1e222bcc;
             border-radius: 10px;
             border-color: #334155;
@@ -504,42 +507,42 @@ export component OverlayWindow inherits Window {
                 alignment: center;
 
                 ToolButton {
-                    text-icon: "✎";
+                    icon: @image-url("../assets/icons/pen.svg");
                     tooltip-title: "Pen (Freehand)";
                     tooltip-shortcut: "P";
                     active: root.active-tool == "pen";
                     clicked => { root.active-tool = root.active-tool == "pen" ? "select" : "pen"; root.tool-selected(root.active-tool); }
                 }
                 ToolButton {
-                    text-icon: "―";
+                    icon: @image-url("../assets/icons/line.svg");
                     tooltip-title: "Line (Straight)";
                     tooltip-shortcut: "L";
                     active: root.active-tool == "line";
                     clicked => { root.active-tool = root.active-tool == "line" ? "select" : "line"; root.tool-selected(root.active-tool); }
                 }
                 ToolButton {
-                    text-icon: "➔";
+                    icon: @image-url("../assets/icons/arrow.svg");
                     tooltip-title: "Arrow";
                     tooltip-shortcut: "A";
                     active: root.active-tool == "arrow";
                     clicked => { root.active-tool = root.active-tool == "arrow" ? "select" : "arrow"; root.tool-selected(root.active-tool); }
                 }
                 ToolButton {
-                    text-icon: "▭";
+                    icon: @image-url("../assets/icons/rect.svg");
                     tooltip-title: "Rectangle";
                     tooltip-shortcut: "R";
                     active: root.active-tool == "rect";
                     clicked => { root.active-tool = root.active-tool == "rect" ? "select" : "rect"; root.tool-selected(root.active-tool); }
                 }
                 ToolButton {
-                    text-icon: "🖍";
+                    icon: @image-url("../assets/icons/marker.svg");
                     tooltip-title: "Highlighter";
                     tooltip-shortcut: "M";
                     active: root.active-tool == "marker";
                     clicked => { root.active-tool = root.active-tool == "marker" ? "select" : "marker"; root.tool-selected(root.active-tool); }
                 }
                 ToolButton {
-                    text-icon: "░";
+                    icon: @image-url("../assets/icons/redact.svg");
                     tooltip-title: "Blur / Redact";
                     tooltip-shortcut: "B";
                     active: root.active-tool == "redact";
@@ -552,19 +555,19 @@ export component OverlayWindow inherits Window {
                 // Color palette circles
                 HorizontalLayout {
                     alignment: center;
-                    spacing: 4px;
+                    spacing: 6px;
                     ColorDot { dot-color: #e53935; tooltip-title: "Red"; is-active: root.active-color-idx == 0; clicked => { root.active-color-idx = 0; root.color-selected(0); } }
                     ColorDot { dot-color: #1e88e5; tooltip-title: "Blue"; is-active: root.active-color-idx == 1; clicked => { root.active-color-idx = 1; root.color-selected(1); } }
                 }
                 HorizontalLayout {
                     alignment: center;
-                    spacing: 4px;
+                    spacing: 6px;
                     ColorDot { dot-color: #43a047; tooltip-title: "Green"; is-active: root.active-color-idx == 2; clicked => { root.active-color-idx = 2; root.color-selected(2); } }
                     ColorDot { dot-color: #fdd835; tooltip-title: "Yellow"; is-active: root.active-color-idx == 3; clicked => { root.active-color-idx = 3; root.color-selected(3); } }
                 }
                 HorizontalLayout {
                     alignment: center;
-                    spacing: 4px;
+                    spacing: 6px;
                     ColorDot { dot-color: #ffffff; tooltip-title: "White"; is-active: root.active-color-idx == 4; clicked => { root.active-color-idx = 4; root.color-selected(4); } }
                     ColorDot { dot-color: #212121; tooltip-title: "Black"; is-active: root.active-color-idx == 5; clicked => { root.active-color-idx = 5; root.color-selected(5); } }
                 }
@@ -572,7 +575,7 @@ export component OverlayWindow inherits Window {
                 Rectangle { height: 1px; background: #334155; }
 
                 ToolButton {
-                    text-icon: "↶";
+                    icon: @image-url("../assets/icons/undo.svg");
                     tooltip-title: "Undo";
                     tooltip-shortcut: "Ctrl+Z";
                     clicked => { root.undo-requested(); }
@@ -599,7 +602,7 @@ export component OverlayWindow inherits Window {
                 alignment: center;
 
                 ToolButton {
-                    text-icon: "✕";
+                    icon: @image-url("../assets/icons/close.svg");
                     tooltip-title: "Close";
                     tooltip-shortcut: "Esc";
                     tooltip-side: "top";
@@ -608,7 +611,7 @@ export component OverlayWindow inherits Window {
                     clicked => { root.close-requested(); }
                 }
                 ToolButton {
-                    text-icon: "💾";
+                    icon: @image-url("../assets/icons/save.svg");
                     tooltip-title: "Save to File";
                     tooltip-shortcut: "Ctrl+S";
                     tooltip-side: "top";
@@ -617,7 +620,7 @@ export component OverlayWindow inherits Window {
                     clicked => { root.save-requested(); }
                 }
                 ToolButton {
-                    text-icon: "📋";
+                    icon: @image-url("../assets/icons/copy.svg");
                     tooltip-title: "Copy to Clipboard";
                     tooltip-shortcut: "Ctrl+C";
                     tooltip-side: "top";

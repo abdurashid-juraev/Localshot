@@ -60,9 +60,16 @@ fn sync_overlay(overlay_weak: &slint::Weak<OverlayWindow>, img: &RgbaImage) {
 }
 
 /// Captures the screen, resets state and UI controls, then reveals the overlay window
-fn perform_capture(overlay: &OverlayWindow, state_lock: &Arc<Mutex<Option<AppState>>>) {
+fn perform_capture(overlay: &OverlayWindow, state_lock: &Arc<Mutex<Option<AppState>>>) -> bool {
     let capturer = HardwareScreenCapturer;
-    match capturer.capture() {
+    // Attempt capture with a brief retry for desktop/portal focus transition delays
+    let mut capture_res = capturer.capture();
+    if capture_res.is_err() {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        capture_res = capturer.capture();
+    }
+
+    match capture_res {
         Ok(frame) => {
             let slint_img = frame.slint_image.clone();
             let mut guard = state_lock.lock().unwrap();
@@ -84,9 +91,11 @@ fn perform_capture(overlay: &OverlayWindow, state_lock: &Arc<Mutex<Option<AppSta
             overlay.set_active_color_idx(0);
 
             let _ = overlay.show();
+            true
         }
         Err(e) => {
             eprintln!("LocalShot: Screen capture error: {}", e);
+            false
         }
     }
 }
@@ -315,7 +324,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // If started directly (not in silent daemon/background mode), take initial capture
     if !is_daemon_mode {
-        perform_capture(&overlay, &state_lock);
+        if !perform_capture(&overlay, &state_lock) {
+            eprintln!("LocalShot: Could not capture screen, aborting without opening blank window.");
+            return Ok(());
+        }
     } else {
         println!("LocalShot: Running silently in tray mode. Press PrtScn or Ctrl+Alt+S to capture.");
     }

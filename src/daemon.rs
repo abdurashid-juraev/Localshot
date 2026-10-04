@@ -33,6 +33,28 @@ pub fn trigger_quit() {
     }
 }
 
+const IPC_PORT: u16 = 42135;
+
+pub fn check_or_signal_existing_instance() -> DaemonInitResult {
+    match std::net::UdpSocket::bind(("127.0.0.1", IPC_PORT)) {
+        Ok(socket) => {
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8];
+                while let Ok((_, _)) = socket.recv_from(&mut buf) {
+                    trigger_capture();
+                }
+            });
+            DaemonInitResult::PrimaryInstance
+        }
+        Err(_) => {
+            if let Ok(sender) = std::net::UdpSocket::bind("127.0.0.1:0") {
+                let _ = sender.send_to(b"SNAP", ("127.0.0.1", IPC_PORT));
+            }
+            DaemonInitResult::AlreadyRunningSignaled
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use super::*;
@@ -41,10 +63,7 @@ mod windows_impl {
         GlobalHotKeyEvent, GlobalHotKeyManager,
     };
     use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-    use std::net::UdpSocket;
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-
-    const IPC_PORT: u16 = 42135;
 
     pub struct DaemonState {
         pub _hotkey_manager: Option<GlobalHotKeyManager>,
@@ -110,26 +129,6 @@ mod windows_impl {
         Icon::from_rgba(rgba, size, size).unwrap()
     }
 
-    pub fn check_or_signal_existing_instance() -> DaemonInitResult {
-        match UdpSocket::bind(("127.0.0.1", IPC_PORT)) {
-            Ok(socket) => {
-                std::thread::spawn(move || {
-                    let mut buf = [0u8; 8];
-                    while let Ok((_, _)) = socket.recv_from(&mut buf) {
-                        trigger_capture();
-                    }
-                });
-                DaemonInitResult::PrimaryInstance
-            }
-            Err(_) => {
-                if let Ok(sender) = UdpSocket::bind("127.0.0.1:0") {
-                    let _ = sender.send_to(b"SNAP", ("127.0.0.1", IPC_PORT));
-                }
-                DaemonInitResult::AlreadyRunningSignaled
-            }
-        }
-    }
-
     pub fn init_daemon() -> DaemonState {
         // Register Global Hotkeys (PrintScreen and Ctrl+Alt+S)
         let hotkey_manager = if let Ok(manager) = GlobalHotKeyManager::new() {
@@ -185,13 +184,7 @@ pub use windows_impl::*;
 
 #[cfg(not(target_os = "windows"))]
 mod non_windows_impl {
-    use super::*;
-
     pub struct DaemonState;
-
-    pub fn check_or_signal_existing_instance() -> DaemonInitResult {
-        DaemonInitResult::PrimaryInstance
-    }
 
     pub fn init_daemon() -> DaemonState {
         DaemonState
