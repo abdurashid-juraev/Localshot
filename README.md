@@ -32,6 +32,7 @@ A 100% offline, privacy-first, 1:1 Lightshot clone built in high-performance **R
     - 💾 **Save (`Ctrl + S`)**: Saves PNG image with timestamp to local disk (`~/Pictures/Screenshots` or current directory).
     - ❌ **Close (`Esc`)**: Drops all buffers from RAM and exits immediately.
 - **Smart Edge Flipping**: Toolbars automatically flip inside or above the selection when near the screen borders so buttons are never cut off.
+- **System Tray & Updater**: Runs silently in the system tray (`PrtScn` or `Ctrl+Alt+S`). Check for updates on demand via the tray menu. Zero background tracking or telemetry.
 
 ---
 

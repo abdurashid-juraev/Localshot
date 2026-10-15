@@ -1,8 +1,8 @@
 ; Script generated for LocalShot Professional Installer
 #define MyAppName "LocalShot"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.1.4"
 #define MyAppPublisher "LocalShot Team"
-#define MyAppURL "https://github.com/LocalShot"
+#define MyAppURL "https://github.com/abdurashid-juraev/Localshot"
 #define MyAppExeName "localshot.exe"
 
 [Setup]

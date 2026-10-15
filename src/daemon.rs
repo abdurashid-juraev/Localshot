@@ -9,6 +9,7 @@ pub enum DaemonInitResult {
 type DaemonCallback = Box<dyn Fn() + Send + Sync + 'static>;
 static CAPTURE_CALLBACK: Mutex<Option<DaemonCallback>> = Mutex::new(None);
 static QUIT_CALLBACK: Mutex<Option<DaemonCallback>> = Mutex::new(None);
+static UPDATE_CALLBACK: Mutex<Option<DaemonCallback>> = Mutex::new(None);
 
 pub fn set_capture_callback<F: Fn() + Send + Sync + 'static>(cb: F) {
     *CAPTURE_CALLBACK.lock().unwrap() = Some(Box::new(cb));
@@ -16,6 +17,10 @@ pub fn set_capture_callback<F: Fn() + Send + Sync + 'static>(cb: F) {
 
 pub fn set_quit_callback<F: Fn() + Send + Sync + 'static>(cb: F) {
     *QUIT_CALLBACK.lock().unwrap() = Some(Box::new(cb));
+}
+
+pub fn set_update_callback<F: Fn() + Send + Sync + 'static>(cb: F) {
+    *UPDATE_CALLBACK.lock().unwrap() = Some(Box::new(cb));
 }
 
 #[allow(dead_code)]
@@ -29,6 +34,17 @@ pub fn trigger_capture() {
 pub fn trigger_quit() {
     if let Some(cb) = QUIT_CALLBACK.lock().unwrap().as_ref() {
         cb();
+    }
+}
+
+#[allow(dead_code)]
+pub fn trigger_update_check() {
+    if let Some(cb) = UPDATE_CALLBACK.lock().unwrap().as_ref() {
+        cb();
+    } else {
+        std::thread::spawn(|| {
+            crate::updater::check_for_updates(true);
+        });
     }
 }
 
@@ -156,15 +172,25 @@ mod windows_impl {
         // Tray Menu & Icon
         let tray_menu = Menu::new();
         let capture_i = MenuItem::new("Take Screenshot (PrtScn)", true, None);
+        let update_i = MenuItem::new("Check for Updates...", true, None);
         let quit_i = MenuItem::new("Quit LocalShot", true, None);
-        let _ = tray_menu.append_items(&[&capture_i, &PredefinedMenuItem::separator(), &quit_i]);
+        let _ = tray_menu.append_items(&[
+            &capture_i,
+            &PredefinedMenuItem::separator(),
+            &update_i,
+            &PredefinedMenuItem::separator(),
+            &quit_i,
+        ]);
 
         let capture_id = capture_i.id().clone();
+        let update_id = update_i.id().clone();
         let quit_id = quit_i.id().clone();
 
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             if event.id == capture_id {
                 trigger_capture();
+            } else if event.id == update_id {
+                trigger_update_check();
             } else if event.id == quit_id {
                 trigger_quit();
             }

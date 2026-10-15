@@ -6,6 +6,7 @@ mod config;
 mod daemon;
 mod draw;
 mod state;
+mod updater;
 
 use capture::{HardwareScreenCapturer, ScreenCapturer};
 use clipboard::{ClipboardService, SystemClipboard};
@@ -107,6 +108,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check single instance and IPC (if already running, signal existing instance to capture)
     if daemon::check_or_signal_existing_instance() == DaemonInitResult::AlreadyRunningSignaled {
         println!("LocalShot is already running. Triggered screen capture in active instance.");
+        return Ok(());
+    }
+
+    if std::env::args().any(|a| a == "--check-updates" || a == "--update") {
+        updater::check_for_updates(true);
         return Ok(());
     }
 
