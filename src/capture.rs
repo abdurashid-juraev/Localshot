@@ -7,6 +7,8 @@ use xcap::Monitor;
 pub struct CapturedFrame {
     pub raw_image: RgbaImage,
     pub slint_image: Image,
+    pub x: i32,
+    pub y: i32,
     pub width: u32,
     pub height: u32,
 }
@@ -38,6 +40,8 @@ pub fn capture_screen() -> Result<CapturedFrame, Box<dyn Error>> {
         .or_else(|| monitors.first())
         .ok_or("Failed to select active monitor")?;
 
+    let x = monitor.x();
+    let y = monitor.y();
     let raw_image = monitor.capture_image()?;
     let (width, height) = raw_image.dimensions();
 
@@ -46,6 +50,8 @@ pub fn capture_screen() -> Result<CapturedFrame, Box<dyn Error>> {
     Ok(CapturedFrame {
         raw_image,
         slint_image,
+        x,
+        y,
         width,
         height,
     })

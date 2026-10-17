@@ -13,6 +13,7 @@ use clipboard::{ClipboardService, SystemClipboard};
 use daemon::DaemonInitResult;
 use draw::Tool;
 use image::RgbaImage;
+use slint::{PhysicalPosition, PhysicalSize};
 use state::AppState;
 use std::sync::{Arc, Mutex};
 
@@ -60,6 +61,19 @@ fn sync_overlay(overlay_weak: &slint::Weak<OverlayWindow>, img: &RgbaImage) {
     }
 }
 
+/// Positions the overlay window precisely over the target monitor,
+/// resets OS-level cascading offsets, and reveals the window in fullscreen.
+fn position_and_show_overlay(overlay: &OverlayWindow, x: i32, y: i32, width: u32, height: u32) {
+    let window = overlay.window();
+    window.set_fullscreen(true);
+    window.set_position(PhysicalPosition::new(x, y));
+    window.set_size(PhysicalSize::new(width, height));
+    let _ = overlay.show();
+    // Reinforce position post-show to eliminate OS cascading/DWM shadow drift on repeat toggles
+    window.set_position(PhysicalPosition::new(x, y));
+    window.set_size(PhysicalSize::new(width, height));
+}
+
 /// Captures the screen, resets state and UI controls, then reveals the overlay window
 fn perform_capture(overlay: &OverlayWindow, state_lock: &Arc<Mutex<Option<AppState>>>) -> bool {
     let capturer = HardwareScreenCapturer;
@@ -73,6 +87,7 @@ fn perform_capture(overlay: &OverlayWindow, state_lock: &Arc<Mutex<Option<AppSta
     match capture_res {
         Ok(frame) => {
             let slint_img = frame.slint_image.clone();
+            let (x, y, w, h) = (frame.x, frame.y, frame.width, frame.height);
             let mut guard = state_lock.lock().unwrap();
             if let Some(state) = guard.as_mut() {
                 state.reset(frame);
@@ -91,7 +106,7 @@ fn perform_capture(overlay: &OverlayWindow, state_lock: &Arc<Mutex<Option<AppSta
             overlay.set_active_tool(Tool::Select.as_str_id().into());
             overlay.set_active_color_idx(0);
 
-            let _ = overlay.show();
+            position_and_show_overlay(overlay, x, y, w, h);
             true
         }
         Err(e) => {

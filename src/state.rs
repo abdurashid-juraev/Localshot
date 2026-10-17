@@ -299,6 +299,8 @@ mod tests {
         CapturedFrame {
             raw_image: raw,
             slint_image: Image::default(),
+            x: 0,
+            y: 0,
             width: w,
             height: h,
         }
