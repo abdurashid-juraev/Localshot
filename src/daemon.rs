@@ -19,6 +19,7 @@ pub fn set_quit_callback<F: Fn() + Send + Sync + 'static>(cb: F) {
     *QUIT_CALLBACK.lock().unwrap() = Some(Box::new(cb));
 }
 
+#[allow(dead_code)]
 pub fn set_update_callback<F: Fn() + Send + Sync + 'static>(cb: F) {
     *UPDATE_CALLBACK.lock().unwrap() = Some(Box::new(cb));
 }

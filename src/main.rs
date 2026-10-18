@@ -136,6 +136,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _daemon_state = daemon::init_daemon();
 
+    // Spawn non-blocking background auto-update check (respects 24h cooldown)
+    updater::spawn_background_update_check();
+
     let overlay = OverlayWindow::new()?;
     let state_lock = Arc::new(Mutex::new(None));
     let overlay_weak = overlay.as_weak();
