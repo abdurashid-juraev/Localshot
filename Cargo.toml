@@ -1,6 +1,6 @@
 [package]
 name = "localshot"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 authors = ["LocalShot Team"]
 description = "100% offline, privacy-first, 1:1 Lightshot clone"
