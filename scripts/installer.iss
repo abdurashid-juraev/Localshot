@@ -1,6 +1,6 @@
 ; Script generated for LocalShot Professional Installer
 #define MyAppName "LocalShot"
-#define MyAppVersion "0.1.6"
+#define MyAppVersion "0.1.7"
 #define MyAppPublisher "LocalShot Team"
 #define MyAppURL "https://github.com/abdurashid-juraev/Localshot"
 #define MyAppExeName "localshot.exe"
@@ -20,7 +20,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequiredOverridesAllowed=commandline dialog
 SourceDir=..
 OutputDir=dist
-OutputBaseFilename=LocalShot-Setup-{#MyAppVersion}
+OutputBaseFilename=LocalShot-Setup-{#MyAppVersion}-x64
 SetupIconFile=assets\icon.ico
 UninstallDisplayIcon={app}\icon.ico
 Compression=lzma2/ultra64

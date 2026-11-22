@@ -143,6 +143,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: |
+          if (-not (Test-Path target\release)) { New-Item -ItemType Directory -Path target\release | Out-Null }
+          Copy-Item target\${{ matrix.target }}\release\localshot.exe target\release\localshot.exe -Force
+
           & powershell -ExecutionPolicy Bypass -File .\scripts\make_icon.ps1
 
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
