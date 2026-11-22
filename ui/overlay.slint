@@ -4,6 +4,14 @@ export struct TouchModifiers {
     alt: bool,
 }
 
+export struct ImageTile {
+    img: image,
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+}
+
 component ResizeHandleDot inherits Rectangle {
     width: 10px;
     height: 10px;
@@ -147,6 +155,12 @@ component ColorDot inherits Rectangle {
 export component OverlayWindow inherits Window {
     title: "localshot-overlay";
     in-out property <image> background-image;
+    in-out property <[ImageTile]> bg-tiles;
+    in-out property <image> preview-image;
+    in-out property <length> preview-x: 0px;
+    in-out property <length> preview-y: 0px;
+    in-out property <length> preview-w: 0px;
+    in-out property <length> preview-h: 0px;
     in-out property <bool> is-selecting: false;
     in-out property <bool> has-selection: false;
     in-out property <length> sel-x: 0px;
@@ -155,10 +169,40 @@ export component OverlayWindow inherits Window {
     in-out property <length> sel-h: 0px;
     in-out property <string> dimension-text: "";
 
-    // Active tool: "select", "pen", "line", "arrow", "rect", "marker", "redact"
+    // Active tool: "select", "pen", "line", "arrow", "rect", "marker", "redact", "text"
     in-out property <string> active-tool: "select";
-    // Active color index: 0=Red, 1=Blue, 2=Green, 3=Yellow, 4=White, 5=Black
+    // Active color index: 0=Red, 1=Blue, 2=Green, 3=Yellow, 4=White, 5=Black, 6=Custom
     in-out property <int> active-color-idx: 0;
+    in-out property <int> active-thickness: 3;
+    in-out property <bool> can-undo: false;
+    in-out property <bool> can-redo: false;
+
+    // Custom color picker state
+    in-out property <bool> show-color-picker: false;
+    in-out property <color> custom-color: #ff6b00;
+    in-out property <string> custom-color-hex: "#ff6b00";
+    in-out property <float> picker-h: 25.0;
+    in-out property <float> picker-s: 1.0;
+    in-out property <float> picker-v: 1.0;
+    in-out property <color> picker-hue-color: #ff6b00;
+    in-out property <color> active-draw-color: #e53935;
+
+    // Inline text tool editor state
+    in-out property <bool> text-editing: false;
+    in-out property <length> text-edit-x: 0px;
+    in-out property <length> text-edit-y: 0px;
+    in-out property <length> text-edit-max-w: 200px;
+    in-out property <length> text-edit-max-h: 100px;
+    in-out property <string> text-edit-value: "";
+    in-out property <length> text-font-size: 18px;
+
+    // Optional loupe (compiled/enabled only with `--features loupe`)
+    in-out property <bool> loupe-enabled: false;
+    in-out property <bool> loupe-visible: false;
+    in-out property <image> loupe-image;
+    in-out property <length> loupe-x: 0px;
+    in-out property <length> loupe-y: 0px;
+    in-out property <string> loupe-text: "";
 
     // Cursor driven dynamically by Rust hit-testing
     in-out property <string> cursor-name: "crosshair";
@@ -177,6 +221,11 @@ export component OverlayWindow inherits Window {
     callback redo-requested();
     callback tool-selected(string);
     callback color-selected(int);
+    callback thickness-delta(int);
+    callback custom-color-hsv-changed(float, float, float);
+    callback custom-color-hex-changed(string);
+    callback text-commit-requested(string);
+    callback text-cancel-requested();
 
     // Single unified interaction callbacks
     callback touch-event(string, length, length, TouchModifiers, bool);
@@ -185,6 +234,14 @@ export component OverlayWindow inherits Window {
 
     // Direct keyboard focus to key-handler on every show
     forward-focus: key-handler;
+
+    public function focus-text-editor() {
+        text-editor.focus();
+    }
+
+    public function focus-key-handler() {
+        key-handler.focus();
+    }
 
     public function toggle-tool(tool: string) {
         root.active-tool = root.active-tool == tool ? "select" : tool;
@@ -199,11 +256,19 @@ export component OverlayWindow inherits Window {
     no-frame: true;
     always-on-top: true;
 
-    // Desktop background (rendered 1:1)
-    Image {
+    // Desktop background (rendered 1:1; uses tiles if frame exceeds GPU max texture size)
+    if root.bg-tiles.length == 0 : Image {
         width: 100%;
         height: 100%;
         source: root.background-image;
+        image-rendering: pixelated;
+    }
+    for tile in root.bg-tiles : Image {
+        x: tile.x;
+        y: tile.y;
+        width: tile.w;
+        height: tile.h;
+        source: tile.img;
         image-rendering: pixelated;
     }
 
@@ -243,6 +308,19 @@ export component OverlayWindow inherits Window {
         moved => {
             root.touch-event("move", self.mouse-x, self.mouse-y, { control: false, shift: false, alt: false }, self.pressed);
         }
+
+        scroll-event(event) => {
+            if (root.active-tool != "select") {
+                if (event.delta-y > 0px) {
+                    root.thickness-delta(1);
+                    return accept;
+                } else if (event.delta-y < 0px) {
+                    root.thickness-delta(-1);
+                    return accept;
+                }
+            }
+            reject
+        }
     }
 
     // Cutout Viewport (1:1 unscaled desktop rendering through cutout)
@@ -253,12 +331,30 @@ export component OverlayWindow inherits Window {
         height: root.sel-h;
         clip: true;
 
-        Image {
+        if root.bg-tiles.length == 0 : Image {
             x: -root.sel-x;
             y: -root.sel-y;
             width: root.width;
             height: root.height;
             source: root.background-image;
+            image-rendering: pixelated;
+        }
+        for tile in root.bg-tiles : Image {
+            x: tile.x - root.sel-x;
+            y: tile.y - root.sel-y;
+            width: tile.w;
+            height: tile.h;
+            source: tile.img;
+            image-rendering: pixelated;
+        }
+
+        // Live annotation preview layer (bounding-box only, transparent background)
+        if root.preview-w > 0px && root.preview-h > 0px : Image {
+            x: root.preview-x - root.sel-x;
+            y: root.preview-y - root.sel-y;
+            width: root.preview-w;
+            height: root.preview-h;
+            source: root.preview-image;
             image-rendering: pixelated;
         }
 
@@ -268,6 +364,42 @@ export component OverlayWindow inherits Window {
             height: 100%;
             border-color: #0088ff;
             border-width: 1.5px;
+        }
+    }
+
+    // Inline Text Tool Editor (IME + multi-line, bounded to selection)
+    Rectangle {
+        visible: root.text-editing && (root.has-selection || root.is-selecting);
+        x: root.text-edit-x;
+        y: root.text-edit-y;
+        width: max(80px, min(root.text-edit-max-w, text-editor.preferred-width + 16px));
+        height: max(32px, min(root.text-edit-max-h, text-editor.preferred-height + 12px));
+        background: #0f172a55;
+        border-color: #38bdf8;
+        border-width: 1px;
+        border-radius: 3px;
+        z: 150;
+
+        text-editor := TextInput {
+            x: 4px;
+            y: 4px;
+            width: parent.width - 8px;
+            height: parent.height - 8px;
+            enabled: root.text-editing;
+            text <=> root.text-edit-value;
+            font-size: root.text-font-size;
+            color: root.active-draw-color;
+            single-line: false;
+            wrap: word-wrap;
+
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.text-cancel-requested();
+                    accept
+                } else {
+                    reject
+                }
+            }
         }
     }
 
@@ -328,7 +460,7 @@ export component OverlayWindow inherits Window {
             x: root.vert-toolbar-x;
             y: root.vert-toolbar-y;
             width: 48px;
-            height: 368px;
+            height: 492px;
             background: #1e222bcc;
             border-radius: 10px;
             border-color: #334155;
@@ -388,11 +520,54 @@ export component OverlayWindow inherits Window {
                     active: root.active-tool == "redact";
                     clicked => { root.toggle-tool("redact"); }
                 }
+                ToolButton {
+                    icon: @image-url("../assets/icons/text.svg");
+                    tooltip-title: "Text";
+                    tooltip-shortcut: "T";
+                    active: root.active-tool == "text";
+                    clicked => { root.toggle-tool("text"); }
+                }
 
                 // Separator line
                 Rectangle { height: 1px; background: #334155; }
 
-                // Color palette circles
+                // Per-tool thickness control (- / value / +)
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    height: 22px;
+
+                    Rectangle {
+                        width: 13px;
+                        height: 20px;
+                        border-radius: 4px;
+                        background: th-minus.has-hover ? #ffffff22 : transparent;
+                        Text { text: "-"; color: #cbd5e1; font-size: 12px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                        th-minus := TouchArea { clicked => { root.thickness-delta(-1); } }
+                    }
+                    Text {
+                        width: 18px;
+                        text: root.active-thickness;
+                        color: #f8fafc;
+                        font-size: 10px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        width: 13px;
+                        height: 20px;
+                        border-radius: 4px;
+                        background: th-plus.has-hover ? #ffffff22 : transparent;
+                        Text { text: "+"; color: #cbd5e1; font-size: 12px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                        th-plus := TouchArea { clicked => { root.thickness-delta(1); } }
+                    }
+                }
+
+                // Separator line
+                Rectangle { height: 1px; background: #334155; }
+
+                // Color palette circles + Custom color
                 HorizontalLayout {
                     alignment: center;
                     spacing: 6px;
@@ -411,6 +586,21 @@ export component OverlayWindow inherits Window {
                     ColorDot { dot-color: #ffffff; tooltip-title: "White"; is-active: root.active-color-idx == 4; clicked => { root.select-color(4); } }
                     ColorDot { dot-color: #212121; tooltip-title: "Black"; is-active: root.active-color-idx == 5; clicked => { root.select-color(5); } }
                 }
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 6px;
+                    ColorDot { dot-color: root.custom-color; tooltip-title: "Custom"; is-active: root.active-color-idx == 6; clicked => { root.show-color-picker = !root.show-color-picker; } }
+                    Rectangle {
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 8px;
+                        background: cp-touch.has-hover ? #334155 : #1e293b;
+                        border-color: #64748b;
+                        border-width: 1px;
+                        Text { text: "+"; color: #f8fafc; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                        cp-touch := TouchArea { clicked => { root.show-color-picker = !root.show-color-picker; } }
+                    }
+                }
 
                 Rectangle { height: 1px; background: #334155; }
 
@@ -418,7 +608,162 @@ export component OverlayWindow inherits Window {
                     icon: @image-url("../assets/icons/undo.svg");
                     tooltip-title: "Undo";
                     tooltip-shortcut: "Ctrl+Z";
+                    custom-icon-color: root.can-undo ? #cbd5e1 : #475569;
                     clicked => { root.undo-requested(); }
+                }
+                ToolButton {
+                    icon: @image-url("../assets/icons/redo.svg");
+                    tooltip-title: "Redo";
+                    tooltip-shortcut: "Ctrl+Y";
+                    custom-icon-color: root.can-redo ? #cbd5e1 : #475569;
+                    clicked => { root.redo-requested(); }
+                }
+            }
+        }
+
+        // --- CUSTOM COLOR PICKER POPUP (HSV + Hex) ---
+        if root.show-color-picker : Rectangle {
+            x: root.vert-toolbar-x > 210px ? root.vert-toolbar-x - 204px : root.vert-toolbar-x + 56px;
+            y: min(root.height - 230px, max(8px, root.vert-toolbar-y + 220px));
+            width: 196px;
+            height: 218px;
+            background: #0f172aee;
+            border-radius: 10px;
+            border-color: #334155;
+            border-width: 1px;
+            drop-shadow-blur: 14px;
+            drop-shadow-color: #000000aa;
+            z: 250;
+
+            TouchArea { width: 100%; height: 100%; }
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                // Saturation / Value 2D Square
+                sv-box := Rectangle {
+                    height: 120px;
+                    border-radius: 6px;
+                    clip: true;
+                    background: @linear-gradient(90deg, #ffffff 0%, root.picker-hue-color 100%);
+
+                    Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        background: @linear-gradient(180deg, #00000000 0%, #000000ff 100%);
+                    }
+
+                    // Selector thumb
+                    Rectangle {
+                        x: clamp(root.picker-s * parent.width - 5px, -5px, parent.width - 5px);
+                        y: clamp((1.0 - root.picker-v) * parent.height - 5px, -5px, parent.height - 5px);
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        border-color: #ffffff;
+                        border-width: 2px;
+                    }
+
+                    sv-touch := TouchArea {
+                        pointer-event(ev) => {
+                            if (self.pressed || ev.kind == PointerEventKind.down) {
+                                root.custom-color-hsv-changed(
+                                    root.picker-h,
+                                    clamp(self.mouse-x / self.width, 0.0, 1.0),
+                                    clamp(1.0 - self.mouse-y / self.height, 0.0, 1.0)
+                                );
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                root.custom-color-hsv-changed(
+                                    root.picker-h,
+                                    clamp(self.mouse-x / self.width, 0.0, 1.0),
+                                    clamp(1.0 - self.mouse-y / self.height, 0.0, 1.0)
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Hue Slider
+                Rectangle {
+                    height: 14px;
+                    border-radius: 7px;
+                    background: @linear-gradient(90deg, #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%);
+
+                    Rectangle {
+                        x: clamp((root.picker-h / 360.0) * parent.width - 4px, 0px, parent.width - 8px);
+                        y: 1px;
+                        width: 8px;
+                        height: 12px;
+                        border-radius: 4px;
+                        background: #ffffff;
+                        border-color: #0f172a;
+                        border-width: 1px;
+                    }
+
+                    hue-touch := TouchArea {
+                        pointer-event(ev) => {
+                            if (self.pressed || ev.kind == PointerEventKind.down) {
+                                root.custom-color-hsv-changed(
+                                    clamp(self.mouse-x / self.width, 0.0, 1.0) * 359.9,
+                                    root.picker-s,
+                                    root.picker-v
+                                );
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                root.custom-color-hsv-changed(
+                                    clamp(self.mouse-x / self.width, 0.0, 1.0) * 359.9,
+                                    root.picker-s,
+                                    root.picker-v
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Hex input + preview swatch
+                HorizontalLayout {
+                    spacing: 8px;
+                    height: 26px;
+
+                    Rectangle {
+                        width: 26px;
+                        height: 26px;
+                        border-radius: 6px;
+                        background: root.custom-color;
+                        border-color: #475569;
+                        border-width: 1px;
+                    }
+
+                    Rectangle {
+                        background: #1e293b;
+                        border-radius: 6px;
+                        border-color: #475569;
+                        border-width: 1px;
+
+                        TextInput {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            height: 100%;
+                            text <=> root.custom-color-hex;
+                            color: #f8fafc;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            single-line: true;
+                            accepted => {
+                                root.custom-color-hex-changed(self.text);
+                                root.focus-key-handler();
+                            }
+                            edited => {
+                                root.custom-color-hex-changed(self.text);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -473,6 +818,37 @@ export component OverlayWindow inherits Window {
                     hover-icon-color: #60a5fa;
                     clicked => { root.copy-requested(); }
                 }
+            }
+        }
+    }
+
+    // Optional Loupe (11x11 pixel magnifier, enabled only with `--features loupe`)
+    if root.loupe-enabled && root.loupe-visible : Rectangle {
+        x: root.loupe-x;
+        y: root.loupe-y;
+        width: 122px;
+        height: 142px;
+        background: #0f172aee;
+        border-radius: 8px;
+        border-color: #334155;
+        border-width: 1px;
+        z: 300;
+
+        VerticalLayout {
+            padding: 6px;
+            spacing: 4px;
+            Image {
+                width: 110px;
+                height: 110px;
+                source: root.loupe-image;
+                image-rendering: pixelated;
+            }
+            Text {
+                text: root.loupe-text;
+                color: #f8fafc;
+                font-size: 10px;
+                font-weight: 700;
+                horizontal-alignment: center;
             }
         }
     }

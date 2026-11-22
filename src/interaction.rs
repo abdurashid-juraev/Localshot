@@ -6,6 +6,47 @@
 
 use crate::state::SelectionRect;
 
+/// Minimum width/height (in physical pixels) for a finalized selection.
+pub const MIN_SELECTION_SIZE: u32 = 5;
+
+/// Clamps a physical point `(x, y)` to lie inside `sel` (inclusive of `[x, x + w - 1]`).
+#[inline]
+pub fn clamp_point_to_selection(pt: (i32, i32), sel: &SelectionRect) -> (i32, i32) {
+    if sel.is_empty() {
+        return pt;
+    }
+    let max_x = sel.x + sel.w as i32 - 1;
+    let max_y = sel.y + sel.h as i32 - 1;
+    (pt.0.clamp(sel.x, max_x), pt.1.clamp(sel.y, max_y))
+}
+
+/// Snaps `end` relative to `start` to the nearest 0°, 45°, or 90° angle (for Line / Arrow with Shift).
+pub fn constrain_line_shift(start: (i32, i32), end: (i32, i32)) -> (i32, i32) {
+    let dx = (end.0 - start.0) as f64;
+    let dy = (end.1 - start.1) as f64;
+    let len = dx.hypot(dy);
+    if len < 1e-3 {
+        return end;
+    }
+    let angle = dy.atan2(dx);
+    let step = std::f64::consts::FRAC_PI_4;
+    let snapped = (angle / step).round() * step;
+    (
+        start.0 + (len * snapped.cos()).round() as i32,
+        start.1 + (len * snapped.sin()).round() as i32,
+    )
+}
+
+/// Constrains `end` relative to `start` to form a square (equal |dx| and |dy|, for Rectangle with Shift).
+pub fn constrain_rect_shift(start: (i32, i32), end: (i32, i32)) -> (i32, i32) {
+    let dx = end.0 - start.0;
+    let dy = end.1 - start.1;
+    let side = dx.abs().max(dy.abs());
+    let sx = if dx >= 0 { side } else { -side };
+    let sy = if dy >= 0 { side } else { -side };
+    (start.0 + sx, start.1 + sy)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Handle {
     TopLeft,
@@ -740,5 +781,42 @@ mod tests {
                 horiz_rect
             );
         }
+    }
+
+    #[test]
+    fn test_clamp_point_to_selection() {
+        let sel = SelectionRect {
+            x: 100,
+            y: 200,
+            w: 50,
+            h: 40,
+        };
+        assert_eq!(clamp_point_to_selection((120, 210), &sel), (120, 210));
+        assert_eq!(clamp_point_to_selection((0, 0), &sel), (100, 200));
+        assert_eq!(clamp_point_to_selection((500, 500), &sel), (149, 239));
+    }
+
+    #[test]
+    fn test_constrain_line_shift() {
+        // Nearly horizontal -> 0 deg
+        let h = constrain_line_shift((100, 100), (200, 108));
+        assert_eq!(h.1, 100);
+        assert!(h.0 > 190);
+
+        // Nearly vertical -> 90 deg
+        let v = constrain_line_shift((100, 100), (106, 200));
+        assert_eq!(v.0, 100);
+        assert!(v.1 > 190);
+
+        // Nearly 45 deg -> |dx| == |dy|
+        let d = constrain_line_shift((100, 100), (180, 175));
+        assert_eq!((d.0 - 100).abs(), (d.1 - 100).abs());
+    }
+
+    #[test]
+    fn test_constrain_rect_shift_square() {
+        assert_eq!(constrain_rect_shift((100, 100), (150, 120)), (150, 150));
+        assert_eq!(constrain_rect_shift((100, 100), (60, 80)), (60, 60));
+        assert_eq!(constrain_rect_shift((100, 100), (120, 40)), (160, 40));
     }
 }

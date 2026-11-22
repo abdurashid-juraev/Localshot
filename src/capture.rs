@@ -3,10 +3,13 @@ use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use std::error::Error;
 use xcap::Monitor;
 
+/// Safe conservative GPU texture dimension floor across VMs, RDP, and older GPUs.
+pub const MAX_SAFE_TEXTURE_DIM: u32 = 4096;
+
 #[allow(dead_code)]
 pub struct CapturedFrame {
     pub raw_image: RgbaImage,
-    pub slint_image: Image,
+    pub slint_image: Option<Image>,
     pub x: i32,
     pub y: i32,
     pub width: u32,
@@ -32,6 +35,7 @@ pub fn get_cursor_pos() -> Option<(i32, i32)> {
     #[cfg(target_os = "windows")]
     {
         #[repr(C)]
+        #[allow(clippy::upper_case_acronyms)]
         struct POINT {
             x: i32,
             y: i32,
@@ -84,9 +88,16 @@ pub fn capture_screen() -> Result<CapturedFrame, Box<dyn Error>> {
     let x = monitor.x();
     let y = monitor.y();
     let raw_image = monitor.capture_image()?;
+    if is_all_black_frame(&raw_image) {
+        return Err("Captured frame is completely black (possible Xwayland or protected/DRM content restriction). On Wayland, run LocalShot natively without Xwayland and grant screen-sharing permission.".into());
+    }
     let (width, height) = raw_image.dimensions();
 
-    let slint_image = rgba_to_slint_image(&raw_image);
+    let slint_image = if width <= MAX_SAFE_TEXTURE_DIM && height <= MAX_SAFE_TEXTURE_DIM {
+        Some(rgba_to_slint_image(&raw_image))
+    } else {
+        None
+    };
 
     Ok(CapturedFrame {
         raw_image,
@@ -98,6 +109,16 @@ pub fn capture_screen() -> Result<CapturedFrame, Box<dyn Error>> {
     })
 }
 
+/// Detects an all-black frame (every pixel has R=0, G=0, B=0), which commonly
+/// indicates Xwayland capture failure or DRM/protected content on Wayland.
+pub fn is_all_black_frame(img: &RgbaImage) -> bool {
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return false;
+    }
+    img.pixels().all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0)
+}
+
 /// Converts an in-memory image::RgbaImage directly into slint::Image without disk I/O.
 /// Uses fast SIMD memcpy via make_mut_bytes().
 pub fn rgba_to_slint_image(rgba: &RgbaImage) -> Image {
@@ -105,4 +126,23 @@ pub fn rgba_to_slint_image(rgba: &RgbaImage) -> Image {
     let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
     buffer.make_mut_bytes().copy_from_slice(rgba.as_raw());
     Image::from_rgba8(buffer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgba;
+
+    #[test]
+    fn test_is_all_black_frame() {
+        let empty = RgbaImage::new(0, 0);
+        assert!(!is_all_black_frame(&empty));
+
+        let black = RgbaImage::from_pixel(4, 4, Rgba([0, 0, 0, 255]));
+        assert!(is_all_black_frame(&black));
+
+        let mut almost_black = RgbaImage::from_pixel(4, 4, Rgba([0, 0, 0, 255]));
+        almost_black.put_pixel(3, 2, Rgba([0, 1, 0, 255]));
+        assert!(!is_all_black_frame(&almost_black));
+    }
 }

@@ -1,55 +1,42 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PREFIX="${PREFIX:-$HOME/.local}"
+BIN_DIR="$PREFIX/bin"
+APP_DIR="$PREFIX/share/applications"
+ICON_DIR="$PREFIX/share/icons/hicolor/scalable/apps"
+AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 
-echo "🚀 Installing LocalShot to system..."
+echo "Installing LocalShot to $PREFIX..."
 
-# Ensure cargo is accessible
 if ! command -v cargo >/dev/null 2>&1; then
     if [ -f "$HOME/.cargo/bin/cargo" ]; then
         export PATH="$HOME/.cargo/bin:$PATH"
     fi
 fi
 
-# Build release if not already present
 if [ ! -f "$DIR/target/release/localshot" ]; then
-    echo "📦 Building release binary..."
-    cargo build --release
+    echo "Building release binary..."
+    cargo build --release --manifest-path "$DIR/Cargo.toml"
 fi
 
-# Ensure user directories exist
-mkdir -p "$HOME/.local/bin"
-mkdir -p "$HOME/.local/share/applications"
-mkdir -p "$HOME/.local/share/icons/hicolor/scalable/apps"
-mkdir -p "$HOME/Desktop"
+mkdir -p "$BIN_DIR" "$APP_DIR" "$ICON_DIR" "$AUTOSTART_DIR"
 
-# Copy binary & icons
-echo "🔧 Installing binary and icons..."
-cp "$DIR/target/release/localshot" "$HOME/.local/bin/localshot"
-chmod +x "$HOME/.local/bin/localshot"
+install -m 755 "$DIR/target/release/localshot" "$BIN_DIR/localshot"
+install -m 644 "$DIR/assets/icon.svg" "$ICON_DIR/localshot.svg"
+install -m 644 "$DIR/assets/localshot.desktop" "$APP_DIR/localshot.desktop"
+install -m 644 "$DIR/assets/localshot-autostart.desktop" "$AUTOSTART_DIR/localshot.desktop"
 
-cp "$DIR/assets/icon.svg" "$HOME/.local/share/icons/localshot.svg"
-cp "$DIR/assets/icon.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/localshot.svg"
-
-# Copy desktop entries
-echo "🖥️ Creating desktop launchers..."
-cp "$DIR/assets/localshot.desktop" "$HOME/.local/share/applications/localshot.desktop"
-cp "$DIR/assets/localshot.desktop" "$HOME/Desktop/LocalShot.desktop"
-
-chmod +x "$HOME/.local/share/applications/localshot.desktop"
-chmod +x "$HOME/Desktop/LocalShot.desktop"
-
-# Allow launching in GNOME Desktop
-if command -v gio >/dev/null 2>&1; then
-    gio set "$HOME/Desktop/LocalShot.desktop" metadata::trusted true 2>/dev/null || true
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true
 fi
-
 if command -v update-desktop-database >/dev/null 2>&1; then
-    update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+    update-desktop-database "$APP_DIR" 2>/dev/null || true
 fi
 
-echo "✅ LocalShot installed successfully!"
-echo "📍 Desktop shortcut: ~/Desktop/LocalShot.desktop"
-echo "📍 Application menu: Super key -> type 'LocalShot'"
-echo "📍 Binary: ~/.local/bin/localshot"
+echo "LocalShot installed successfully!"
+echo "  Binary:    $BIN_DIR/localshot"
+echo "  Desktop:   $APP_DIR/localshot.desktop"
+echo "  Autostart: $AUTOSTART_DIR/localshot.desktop"
+echo "  Icon:      $ICON_DIR/localshot.svg"

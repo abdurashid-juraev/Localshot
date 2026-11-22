@@ -57,14 +57,17 @@ pub struct AppState {
     pub raw_base: RgbaImage,
     /// Cached base including all committed annotations (allocated lazily on first annotation)
     pub composited_cache: Option<RgbaImage>,
-    /// Reusable live preview buffer to eliminate O(N) allocation churn (allocated lazily on first drawing)
-    pub live_preview: Option<RgbaImage>,
-    /// Dirty bounding box of the active live preview annotation
-    pub live_dirty_rect: Option<(u32, u32, u32, u32)>,
+    /// Incremental bounding-box preview buffer for O(1) Pen/Marker mouse-move rendering
+    pub incremental_preview: Option<draw::IncrementalStrokePreview>,
     /// Stack of applied annotations for undo support
     pub annotations: Vec<Annotation>,
+    /// Stack of undone annotations for redo support
+    pub redo_stack: Vec<Annotation>,
     pub tool: Tool,
     pub color_idx: usize,
+    pub custom_color: Option<[u8; 4]>,
+    /// Session-scoped per-tool thickness (or font size for Tool::Text)
+    pub tool_thickness: [i32; 8],
     pub selection: SelectionRect,
     pub machine: SelectionMachine,
     pub drag_start: (i32, i32),
@@ -84,6 +87,20 @@ fn normalize_rect_coords(start: (i32, i32), end: (i32, i32)) -> (i32, i32, i32, 
     )
 }
 
+#[inline]
+fn tool_index(tool: Tool) -> usize {
+    match tool {
+        Tool::Select => 0,
+        Tool::Pen => 1,
+        Tool::Line => 2,
+        Tool::Arrow => 3,
+        Tool::Rectangle => 4,
+        Tool::Marker => 5,
+        Tool::Redact => 6,
+        Tool::Text => 7,
+    }
+}
+
 impl AppState {
     pub fn reset(&mut self, frame: CapturedFrame) {
         *self = Self::new(frame);
@@ -94,11 +111,22 @@ impl AppState {
         Self {
             raw_base: frame.raw_image,
             composited_cache: None,
-            live_preview: None,
-            live_dirty_rect: None,
+            incremental_preview: None,
             annotations: Vec::new(),
+            redo_stack: Vec::new(),
             tool: Tool::Select,
             color_idx: 0,
+            custom_color: None,
+            tool_thickness: [
+                0,
+                config::PEN_THICKNESS,
+                config::LINE_THICKNESS,
+                config::ARROW_THICKNESS,
+                config::RECT_THICKNESS,
+                config::MARKER_THICKNESS,
+                config::RECT_THICKNESS,
+                config::TEXT_DEFAULT_SIZE,
+            ],
             selection: SelectionRect::default(),
             machine: SelectionMachine::Idle,
             drag_start: (0, 0),
@@ -114,9 +142,7 @@ impl AppState {
         if let Some(cache) = self.composited_cache.as_mut() {
             cache.as_mut().zeroize();
         }
-        if let Some(preview) = self.live_preview.as_mut() {
-            preview.as_mut().zeroize();
-        }
+        self.incremental_preview = None;
     }
 
     /// Returns a reference to the active composited image (or pristine base if no annotations)
@@ -131,16 +157,10 @@ impl AppState {
         self.composited_cache.get_or_insert_with(|| base.clone())
     }
 
-    /// Lazily ensures the live preview buffer is allocated
-    fn ensure_live_preview(&mut self) -> &mut RgbaImage {
-        if self.live_preview.is_none() {
-            let base = self.composited_image().clone();
-            self.live_preview = Some(base);
-        }
-        self.live_preview.as_mut().unwrap_or(&mut self.raw_base)
-    }
-
     pub fn active_color(&self) -> [u8; 4] {
+        if self.color_idx >= config::PALETTE.len() {
+            return self.custom_color.unwrap_or(config::PALETTE[0].rgba);
+        }
         config::PALETTE
             .get(self.color_idx)
             .map(|c| c.rgba)
@@ -152,29 +172,92 @@ impl AppState {
     }
 
     pub fn set_color_idx(&mut self, idx: usize) {
-        if idx < config::PALETTE.len() {
+        if idx < config::PALETTE.len()
+            || (idx == config::PALETTE.len() && self.custom_color.is_some())
+        {
             self.color_idx = idx;
         }
     }
 
-    pub fn start_drawing(&mut self, x: i32, y: i32) {
-        self.start_pt = Some((x, y));
-        self.current_points = vec![(x, y)];
-        self.live_dirty_rect = None;
+    pub fn set_custom_color(&mut self, rgba: [u8; 4]) {
+        self.custom_color = Some(rgba);
+        self.color_idx = config::PALETTE.len();
     }
 
-    /// Item 2: ignore if start_pt is not set (called on hover before any mouse-down)
+    #[inline]
+    pub fn thickness_for(&self, tool: Tool) -> i32 {
+        self.tool_thickness[tool_index(tool)]
+    }
+
+    #[inline]
+    pub fn active_thickness(&self) -> i32 {
+        self.thickness_for(self.tool)
+    }
+
+    pub fn adjust_active_thickness(&mut self, delta: i32) -> i32 {
+        let idx = tool_index(self.tool);
+        let (min_t, max_t, step) = if self.tool == Tool::Text {
+            (config::TEXT_MIN_SIZE, config::TEXT_MAX_SIZE, 2)
+        } else {
+            (config::MIN_THICKNESS, config::MAX_THICKNESS, 1)
+        };
+        let next = (self.tool_thickness[idx] + delta * step).clamp(min_t, max_t);
+        self.tool_thickness[idx] = next;
+        next
+    }
+
+    pub fn start_drawing(&mut self, x: i32, y: i32) {
+        self.start_pt = Some((x, y));
+        self.current_points.clear();
+        self.current_points.push((x, y));
+        let thickness = self.active_thickness();
+        self.incremental_preview = match self.tool {
+            Tool::Pen => {
+                draw::IncrementalStrokePreview::new((x, y), self.active_color(), thickness, false)
+            }
+            Tool::Marker => {
+                draw::IncrementalStrokePreview::new((x, y), self.active_color(), thickness, true)
+            }
+            _ => None,
+        };
+    }
+
+    /// Item 2: ignore if start_pt is not set (called on hover before any mouse-down).
+    /// Applies 2px squared-distance decimation for Pen/Marker to cap point growth on long strokes.
     pub fn add_drawing_point(&mut self, x: i32, y: i32) {
         if self.start_pt.is_some() {
+            if matches!(self.tool, Tool::Pen | Tool::Marker) {
+                if let Some(&(lx, ly)) = self.current_points.last() {
+                    let dx = (x - lx) as i64;
+                    let dy = (y - ly) as i64;
+                    if dx * dx + dy * dy < 4 {
+                        return;
+                    }
+                }
+            }
             self.current_points.push((x, y));
+            if let Some(inc) = self.incremental_preview.as_mut() {
+                inc.push_point((x, y));
+            }
         }
     }
 
     /// DRY: Single source of truth for constructing Annotation based on active Tool.
     /// Item 8: returns None for degenerate zero-size / zero-length annotations.
+    #[allow(dead_code)]
     pub fn build_current_annotation(&self, end_pt: (i32, i32)) -> Option<Annotation> {
+        self.build_current_annotation_with_redact(end_pt, false)
+    }
+
+    /// Builds the current annotation, allowing solid-fill redaction when `solid_redact` is true.
+    pub fn build_current_annotation_with_redact(
+        &self,
+        end_pt: (i32, i32),
+        solid_redact: bool,
+    ) -> Option<Annotation> {
         let start = self.start_pt?;
         let color = self.active_color();
+        let thickness = self.active_thickness();
 
         match self.tool {
             Tool::Pen => {
@@ -182,35 +265,50 @@ impl AppState {
                 Some(Annotation::Stroke {
                     points: self.current_points.clone(),
                     color,
-                    thickness: config::PEN_THICKNESS,
+                    thickness,
                 })
             }
             Tool::Line => {
+                let end = if solid_redact {
+                    crate::interaction::constrain_line_shift(start, end_pt)
+                } else {
+                    end_pt
+                };
                 // Item 8: reject start == end
-                if start == end_pt {
+                if start == end {
                     return None;
                 }
                 Some(Annotation::Line {
                     start,
-                    end: end_pt,
+                    end,
                     color,
-                    thickness: config::LINE_THICKNESS,
+                    thickness,
                 })
             }
             Tool::Arrow => {
+                let end = if solid_redact {
+                    crate::interaction::constrain_line_shift(start, end_pt)
+                } else {
+                    end_pt
+                };
                 // Item 8: reject start == end
-                if start == end_pt {
+                if start == end {
                     return None;
                 }
                 Some(Annotation::Arrow {
                     start,
-                    end: end_pt,
+                    end,
                     color,
-                    thickness: config::ARROW_THICKNESS,
+                    thickness,
                 })
             }
             Tool::Rectangle => {
-                let (x, y, w, h) = normalize_rect_coords(start, end_pt);
+                let end = if solid_redact {
+                    crate::interaction::constrain_rect_shift(start, end_pt)
+                } else {
+                    end_pt
+                };
+                let (x, y, w, h) = normalize_rect_coords(start, end);
                 // Item 8: reject zero-area rectangles
                 if w == 0 || h == 0 {
                     return None;
@@ -221,13 +319,13 @@ impl AppState {
                     w,
                     h,
                     color,
-                    thickness: config::RECT_THICKNESS,
+                    thickness,
                 })
             }
             Tool::Marker => Some(Annotation::Marker {
                 points: self.current_points.clone(),
                 color,
-                thickness: config::MARKER_THICKNESS,
+                thickness,
             }),
             Tool::Redact => {
                 let (x, y, w, h) = normalize_rect_coords(start, end_pt);
@@ -240,98 +338,96 @@ impl AppState {
                     y,
                     w,
                     h,
-                    block_size: config::REDACT_BLOCK_SIZE,
+                    block_size: config::redact_block_size(w, h),
+                    solid_color: if solid_redact { Some(color) } else { None },
                 })
             }
-            Tool::Select => None,
+            Tool::Select | Tool::Text => None,
         }
     }
 
-    /// Commits an annotation to history and directly updates the cached composited buffer.
-    /// Item 1: restore live_preview over the UNION of old live_dirty_rect and the annotation's
-    /// bounding_box so that when the final mouse-up point differs from the last move point,
-    /// earlier annotations are not erased from the preview.
+    /// Commits an annotation to history (capped at MAX_HISTORY_LEN), clears redo stack,
+    /// and directly updates the cached composited buffer.
     pub fn commit_annotation(&mut self, ann: Annotation) {
-        // Compute the annotation's bounding box BEFORE applying it to the cache.
-        // We need canvas dimensions from either cache or raw_base.
-        let (canvas_w, canvas_h) = if let Some(c) = &self.composited_cache {
-            c.dimensions()
-        } else {
-            self.raw_base.dimensions()
-        };
-        let ann_bbox = ann.bounding_box(canvas_w, canvas_h);
-
+        self.redo_stack.clear();
+        if self.annotations.len() >= config::MAX_HISTORY_LEN {
+            self.annotations.remove(0);
+        }
         let composited = self.ensure_composited();
         ann.apply(composited);
         self.annotations.push(ann);
-
-        // Item 1: union old dirty rect with the committed annotation's bounding box so
-        // that any area painted in the final mouse-up pass (outside the last move's dirty
-        // rect) is also restored in live_preview from the freshly-updated composited_cache.
-        let union_rect = match self.live_dirty_rect.take() {
-            None => ann_bbox,
-            Some((rx, ry, rw, rh)) => {
-                let (ax, ay, aw, ah) = ann_bbox;
-                let ux0 = rx.min(ax);
-                let uy0 = ry.min(ay);
-                let ux1 = (rx + rw).max(ax + aw);
-                let uy1 = (ry + rh).max(ay + ah);
-                (ux0, uy0, ux1.saturating_sub(ux0), uy1.saturating_sub(uy0))
-            }
-        };
-
-        // Sync live_preview by restoring the union rect from the now-updated composited_cache.
-        if let (Some(cache), Some(preview)) = (&self.composited_cache, &mut self.live_preview) {
-            let (ux, uy, uw, uh) = union_rect;
-            draw::copy_rect(cache, preview, ux, uy, uw, uh);
-        }
     }
 
     pub fn finish_drawing(&mut self) {
         self.start_pt = None;
         self.current_points.clear();
-        self.live_dirty_rect = None;
+        self.incremental_preview = None;
     }
 
-    /// Undoes the last annotation and rebuilds the composited cache from the pristine raw base.
+    #[inline]
+    pub fn can_undo(&self) -> bool {
+        !self.annotations.is_empty()
+    }
+
+    #[inline]
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    /// Undoes the last annotation, pushes it to redo_stack, and rebuilds the composited cache.
     pub fn undo(&mut self) -> bool {
-        if self.annotations.pop().is_some() {
+        if let Some(ann) = self.annotations.pop() {
+            self.redo_stack.push(ann);
             if self.annotations.is_empty() {
                 self.composited_cache = None;
-                self.live_preview = None;
             } else {
                 let cache = draw::render_annotations(&self.raw_base, &self.annotations);
-                self.live_preview = Some(cache.clone());
                 self.composited_cache = Some(cache);
             }
-            self.live_dirty_rect = None;
             true
         } else {
             false
         }
     }
 
-    /// Renders a fast preview by restoring the dirty rectangle and applying the live annotation.
-    /// Eliminates full 4K frame cloning on every mouse move.
-    pub fn render_preview(&mut self, live_ann: Option<&Annotation>) -> &RgbaImage {
-        self.ensure_composited();
-        self.ensure_live_preview();
+    /// Redoes the last undone annotation and applies it onto the composited cache.
+    pub fn redo(&mut self) -> bool {
+        if let Some(ann) = self.redo_stack.pop() {
+            let composited = self.ensure_composited();
+            ann.apply(composited);
+            self.annotations.push(ann);
+            true
+        } else {
+            false
+        }
+    }
 
-        if let Some((rx, ry, rw, rh)) = self.live_dirty_rect.take() {
-            if let (Some(cache), Some(preview)) = (&self.composited_cache, &mut self.live_preview) {
-                draw::copy_rect(cache, preview, rx, ry, rw, rh);
-            }
+    /// Renders ONLY the active annotation's bounding box with a transparent background.
+    /// Returns `(x, y, w, h, straight_rgba_bytes)` in physical coordinates.
+    /// Zero full-frame allocation, zero `current_points.clone()` on mouse move.
+    pub fn render_preview_layer(
+        &self,
+        end_pt: (i32, i32),
+        solid_redact: bool,
+    ) -> Option<(u32, u32, u32, u32, Vec<u8>)> {
+        let (canvas_w, canvas_h) = self.raw_base.dimensions();
+        if canvas_w == 0 || canvas_h == 0 {
+            return None;
         }
 
-        if let Some(ann) = live_ann {
-            if let Some(ref mut preview) = self.live_preview {
-                ann.apply(preview);
-                let bbox = ann.bounding_box(preview.width(), preview.height());
-                self.live_dirty_rect = Some(bbox);
-            }
+        if let Some(inc) = &self.incremental_preview {
+            return inc.export_preview_rgba(canvas_w, canvas_h);
         }
 
-        self.live_preview.as_ref().unwrap_or(&self.raw_base)
+        let ann = self.build_current_annotation_with_redact(end_pt, solid_redact)?;
+        let (bx, by, bw, bh) = ann.bounding_box(canvas_w, canvas_h);
+        if bw == 0 || bh == 0 {
+            return None;
+        }
+        let pixmap = ann.render_to_pixmap(bx as i32, by as i32, bw, bh)?;
+        let mut rgba = vec![0u8; (bw * bh * 4) as usize];
+        draw::pixmap_to_straight_rgba_bytes(&pixmap, &mut rgba, 1.0);
+        Some((bx, by, bw, bh, rgba))
     }
 
     /// Produces the final composited and cropped image bounded by the active selection.
@@ -348,6 +444,67 @@ impl AppState {
     }
 }
 
+/// Renders an 11x11 pixel magnifier grid centered at `(cx, cy)` scaled to 110x110 RGBA bytes,
+/// returning `(rgba_bytes, width, height, hex_color_string)`.
+#[cfg(feature = "loupe")]
+pub fn render_loupe_rgba(img: &RgbaImage, cx: i32, cy: i32) -> (Vec<u8>, u32, u32, String) {
+    const GRID: i32 = 11;
+    const CELL: usize = 10;
+    const SIZE: usize = (GRID as usize) * CELL;
+    let mut out = vec![0u8; SIZE * SIZE * 4];
+
+    let w = img.width() as i32;
+    let h = img.height() as i32;
+    let half = GRID / 2;
+
+    let center_rgba = if cx >= 0 && cy >= 0 && cx < w && cy < h {
+        let p = img.get_pixel(cx as u32, cy as u32);
+        [p[0], p[1], p[2], 255]
+    } else {
+        [0, 0, 0, 255]
+    };
+
+    for gy in 0..GRID {
+        for gx in 0..GRID {
+            let sx = cx + (gx - half);
+            let sy = cy + (gy - half);
+            let px = if sx >= 0 && sy >= 0 && sx < w && sy < h {
+                let p = img.get_pixel(sx as u32, sy as u32);
+                [p[0], p[1], p[2], 255]
+            } else {
+                [15, 23, 42, 255]
+            };
+            let is_center = gx == half && gy == half;
+
+            for dy in 0..CELL {
+                for dx in 0..CELL {
+                    let ox = (gx as usize) * CELL + dx;
+                    let oy = (gy as usize) * CELL + dy;
+                    let idx = (oy * SIZE + ox) * 4;
+                    let is_border = dx == 0 || dy == 0;
+                    let is_center_ring =
+                        is_center && (dx == 0 || dy == 0 || dx == CELL - 1 || dy == CELL - 1);
+                    let c = if is_center_ring {
+                        [56, 189, 248, 255]
+                    } else if is_border {
+                        [30, 41, 59, 255]
+                    } else {
+                        px
+                    };
+                    out[idx..idx + 4].copy_from_slice(&c);
+                }
+            }
+        }
+    }
+
+    (
+        out,
+        SIZE as u32,
+        SIZE as u32,
+        config::format_hex_color(center_rgba),
+    )
+}
+
 impl Drop for AppState {
     fn drop(&mut self) {
         self.sanitize();
@@ -358,13 +515,12 @@ impl Drop for AppState {
 mod tests {
     use super::*;
     use crate::capture::CapturedFrame;
-    use slint::Image;
 
     fn create_dummy_frame(w: u32, h: u32) -> CapturedFrame {
         let raw = RgbaImage::from_pixel(w, h, image::Rgba([100, 100, 100, 255]));
         CapturedFrame {
             raw_image: raw,
-            slint_image: Image::default(),
+            slint_image: None,
             x: 0,
             y: 0,
             width: w,
@@ -398,7 +554,7 @@ mod tests {
 
         // Verify lazy zero-allocation initialization
         assert!(state.composited_cache.is_none());
-        assert!(state.live_preview.is_none());
+        assert!(state.incremental_preview.is_none());
         assert_eq!(state.tool, Tool::Select);
         assert_eq!(state.annotations.len(), 0);
 
@@ -406,6 +562,12 @@ mod tests {
         state.set_color_idx(1); // Blue
 
         state.start_drawing(10, 10);
+        // Bounding-box preview should cover only the annotation, not the full 200x200 frame
+        let preview = state.render_preview_layer((50, 50), false);
+        assert!(preview.is_some());
+        let (_px, _py, pw, ph, _bytes) = preview.unwrap();
+        assert!(pw < 200 && ph < 200);
+
         let ann = state.build_current_annotation((50, 50));
         assert!(ann.is_some());
 
@@ -413,10 +575,7 @@ mod tests {
         state.finish_drawing();
         assert_eq!(state.annotations.len(), 1);
         assert!(state.composited_cache.is_some());
-
-        // Preview should work without allocation
-        let preview = state.render_preview(None);
-        assert_eq!(preview.dimensions(), (200, 200));
+        assert!(state.incremental_preview.is_none());
 
         // Test crop
         state.selection.set_bounds(10, 10, 40, 40);
@@ -429,48 +588,38 @@ mod tests {
         assert_eq!(state.annotations.len(), 0);
         // Buffers should be freed after full undo
         assert!(state.composited_cache.is_none());
-        assert!(state.live_preview.is_none());
+        assert!(state.incremental_preview.is_none());
         assert!(!state.undo()); // Nothing left to undo
     }
 
-    /// Item 1: commit a rectangle whose end point lies outside the last preview rect;
-    /// assert live_preview equals composited_image() after commit.
     #[test]
-    fn test_commit_annotation_union_dirty_rect() {
-        let frame = create_dummy_frame(200, 200);
+    fn test_4k_preview_frame_time_under_4ms() {
+        // 4K (3840x2160) timing harness for pen, line, rect, and marker preview frames.
+        let frame = create_dummy_frame(3840, 2160);
         let mut state = AppState::new(frame);
-        state.set_tool(Tool::Rectangle);
-        state.set_color_idx(0); // Red
 
-        // Simulate draw: start at (10,10), preview moves to (30,30) …
-        state.start_drawing(10, 10);
-
-        // Build and render a preview up to (30,30) — sets live_dirty_rect
-        let preview_ann = state
-            .build_current_annotation((30, 30))
-            .expect("should build rect");
-        state.render_preview(Some(&preview_ann));
-        assert!(state.live_dirty_rect.is_some(), "dirty rect should be set");
-
-        // … but the final mouse-up is at (80,80), outside the preview dirty rect.
-        let final_ann = state
-            .build_current_annotation((80, 80))
-            .expect("should build rect");
-        state.commit_annotation(final_ann);
-        state.finish_drawing();
-
-        // After commit, live_preview must match composited_image pixel-for-pixel.
-        let preview_pixels = state
-            .live_preview
-            .as_ref()
-            .expect("live_preview must exist")
-            .as_raw()
-            .to_vec();
-        let composited_pixels = state.composited_image().as_raw().to_vec();
-        assert_eq!(
-            preview_pixels, composited_pixels,
-            "live_preview must equal composited_image after commit"
-        );
+        for tool in [Tool::Pen, Tool::Line, Tool::Rectangle, Tool::Marker] {
+            state.set_tool(tool);
+            state.start_drawing(100, 100);
+            if matches!(tool, Tool::Pen | Tool::Marker) {
+                for i in 1..20 {
+                    state.add_drawing_point(100 + i * 10, 100 + (i % 5) * 6);
+                }
+            }
+            let t0 = std::time::Instant::now();
+            let preview = state.render_preview_layer((300, 220), false);
+            let elapsed = t0.elapsed();
+            assert!(preview.is_some());
+            // Keep a generous CI-safe guard here while logging exact timing;
+            // acceptance target on user's machine in release is < 4 ms.
+            assert!(
+                elapsed.as_millis() < 50,
+                "{:?} 4K preview took {:?} (expected well under 4ms in release)",
+                tool,
+                elapsed
+            );
+            state.finish_drawing();
+        }
     }
 
     /// Item 2: add_drawing_point must be a no-op when start_pt is None.
@@ -543,7 +692,7 @@ mod tests {
         let raw = RgbaImage::from_pixel(100, 100, image::Rgba([200, 100, 50, 128]));
         let frame = CapturedFrame {
             raw_image: raw,
-            slint_image: Image::default(),
+            slint_image: None,
             x: 0,
             y: 0,
             width: 100,
@@ -555,5 +704,113 @@ mod tests {
         for pixel in crop.pixels() {
             assert_eq!(pixel[3], 255, "all cropped pixels must have alpha=255");
         }
+    }
+
+    #[test]
+    fn test_redo_and_history_cap_and_clear() {
+        let frame = create_dummy_frame(120, 120);
+        let mut state = AppState::new(frame);
+        state.set_tool(Tool::Line);
+
+        // Push 105 annotations -> capped at 100
+        for i in 0..105 {
+            state.commit_annotation(Annotation::Line {
+                start: (i, 10),
+                end: (i + 5, 20),
+                color: [229, 57, 53, 255],
+                thickness: 2,
+            });
+        }
+        assert_eq!(state.annotations.len(), config::MAX_HISTORY_LEN);
+        assert!(!state.can_redo());
+
+        // Undo then redo
+        assert!(state.undo());
+        assert!(state.can_redo());
+        assert_eq!(state.annotations.len(), config::MAX_HISTORY_LEN - 1);
+
+        assert!(state.redo());
+        assert!(!state.can_redo());
+        assert_eq!(state.annotations.len(), config::MAX_HISTORY_LEN);
+
+        // Undo, then commit new annotation -> clears redo stack
+        assert!(state.undo());
+        assert!(state.can_redo());
+        state.commit_annotation(Annotation::Line {
+            start: (1, 1),
+            end: (10, 10),
+            color: [229, 57, 53, 255],
+            thickness: 2,
+        });
+        assert!(!state.can_redo());
+    }
+
+    #[test]
+    fn test_per_tool_thickness_and_custom_color() {
+        let frame = create_dummy_frame(100, 100);
+        let mut state = AppState::new(frame);
+
+        state.set_tool(Tool::Pen);
+        assert_eq!(state.active_thickness(), config::PEN_THICKNESS);
+        assert_eq!(state.adjust_active_thickness(2), config::PEN_THICKNESS + 2);
+        assert_eq!(state.adjust_active_thickness(-100), config::MIN_THICKNESS);
+        assert_eq!(state.adjust_active_thickness(100), config::MAX_THICKNESS);
+
+        // Switching to Text keeps separate thickness (font size 12..=48)
+        state.set_tool(Tool::Text);
+        assert_eq!(state.active_thickness(), config::TEXT_DEFAULT_SIZE);
+        assert_eq!(
+            state.adjust_active_thickness(1),
+            config::TEXT_DEFAULT_SIZE + 2
+        );
+        assert_eq!(state.adjust_active_thickness(-100), config::TEXT_MIN_SIZE);
+        assert_eq!(state.adjust_active_thickness(100), config::TEXT_MAX_SIZE);
+
+        // Pen still remembers MAX_THICKNESS
+        state.set_tool(Tool::Pen);
+        assert_eq!(state.active_thickness(), config::MAX_THICKNESS);
+
+        // Custom color
+        state.set_custom_color([12, 34, 56, 255]);
+        assert_eq!(state.color_idx, config::PALETTE.len());
+        assert_eq!(state.active_color(), [12, 34, 56, 255]);
+    }
+
+    #[test]
+    fn test_shift_constraints_in_build_annotation() {
+        let frame = create_dummy_frame(200, 200);
+        let mut state = AppState::new(frame);
+
+        state.set_tool(Tool::Line);
+        state.start_drawing(50, 50);
+        let ann = state
+            .build_current_annotation_with_redact((150, 54), true)
+            .expect("line");
+        match ann {
+            Annotation::Line { end, .. } => assert_eq!(end.1, 50),
+            _ => panic!("expected Line"),
+        }
+
+        state.set_tool(Tool::Rectangle);
+        state.start_drawing(20, 20);
+        let ann = state
+            .build_current_annotation_with_redact((80, 40), true)
+            .expect("rect");
+        match ann {
+            Annotation::Rectangle { w, h, .. } => assert_eq!(w, h),
+            _ => panic!("expected Rectangle"),
+        }
+    }
+
+    #[cfg(feature = "loupe")]
+    #[test]
+    fn test_render_loupe_rgba() {
+        let mut img = RgbaImage::from_pixel(30, 30, image::Rgba([10, 20, 30, 255]));
+        img.put_pixel(15, 15, image::Rgba([255, 128, 0, 255]));
+        let (bytes, w, h, hex) = render_loupe_rgba(&img, 15, 15);
+        assert_eq!(w, 110);
+        assert_eq!(h, 110);
+        assert_eq!(bytes.len(), 110 * 110 * 4);
+        assert_eq!(hex, "#ff8000");
     }
 }

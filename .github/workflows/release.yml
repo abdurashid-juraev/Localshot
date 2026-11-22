@@ -15,7 +15,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # 1. CI Job: Code Quality & Tests (Runs on all pushes and PRs)
+  # 1. CI Job: Formatting, Clippy, Compilation & Tests
   check-and-test:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -31,6 +31,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
             libx11-dev \
             libxcb1-dev \
             libxrandr-dev \
@@ -43,20 +45,49 @@ jobs:
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Check Formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Check Compilation
         run: cargo check --all-targets
 
-      - name: Run Test Suite
+      - name: Run All Unit & Headless Tests
         run: cargo test --verbose
 
-  # 2. CD Job: Build Release Artifacts (Runs only on version tags like v0.1.0)
+      - name: Run Headless & Golden-Image Tests
+        run: cargo test --test headless --test golden_draw --verbose
+
+  # 2. Security Audit & Dependency Policy (cargo-audit + cargo-deny)
+  security-audit:
+    name: Security Audit & License Policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Cargo Audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cargo Deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses sources
+
+  # 3. CD Job: Build Release Artifacts (Runs only on version tags like v0.1.0)
   build-release:
     name: Build Release (${{ matrix.target }})
-    needs: check-and-test
+    needs: [check-and-test, security-audit]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.os }}
     strategy:
@@ -78,6 +109,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
             libx11-dev \
             libxcb1-dev \
             libxrandr-dev \
@@ -97,17 +130,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build Release Binary
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
 
       # Windows Artifact Packaging & Inno Setup Installer Build
       - name: Build Windows Installer & Zip
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          # Generate icons if needed
           & powershell -ExecutionPolicy Bypass -File .\scripts\make_icon.ps1
-          
-          # Compile Inno Setup installer
+
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (Test-Path $iscc) {
             & $iscc scripts\installer.iss
@@ -115,16 +146,62 @@ jobs:
             iscc scripts\installer.iss
           }
 
-          # Ensure dist folder exists and zip standalone binary
           if (-not (Test-Path dist)) { New-Item -ItemType Directory -Path dist | Out-Null }
-          Compress-Archive -Path target\release\localshot.exe -DestinationPath dist\localshot-windows-x86_64.zip
+          Compress-Archive -Path target\${{ matrix.target }}\release\localshot.exe -DestinationPath dist\localshot-windows-x86_64.zip
 
       # Linux Artifact Packaging
       - name: Build Linux Archive
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist
-          tar -czvf dist/localshot-linux-x86_64.tar.gz -C target/release localshot
+          tar -czvf dist/localshot-linux-x86_64.tar.gz -C target/${{ matrix.target }}/release localshot
+
+      - name: Upload Build Artifacts for Checksum & Signing
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.tar.gz
+
+  # 4. Publish Release: SHA256SUMS + Optional Minisign Signature
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Release Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Sign Release Artifacts with Minisign
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        working-directory: dist
+        run: |
+          if [ -z "$MINISIGN_KEY" ]; then
+            echo "::warning::MINISIGN_KEY secret is not configured; skipping Minisign signatures."
+            exit 0
+          fi
+          sudo apt-get update && sudo apt-get install -y minisign
+          printf '%s' "$MINISIGN_KEY" > /tmp/localshot.key
+          chmod 600 /tmp/localshot.key
+          trap 'rm -f /tmp/localshot.key' EXIT
+          for f in SHA256SUMS *.exe *.zip *.tar.gz; do
+            [ -e "$f" ] || continue
+            printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -s /tmp/localshot.key -m "$f" -t "LocalShot ${GITHUB_REF_NAME}"
+          done
 
       - name: Upload Artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
@@ -133,5 +210,7 @@ jobs:
             dist/*.exe
             dist/*.zip
             dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/*.minisig
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -2,10 +2,20 @@
 Name=LocalShot
 GenericName=Screenshot Tool
 Comment=100% Offline Privacy-First Lightshot Clone
-Exec=sh -c 'exec "$HOME/.local/bin/localshot"'
+Exec=localshot --daemon
 Icon=localshot
 Terminal=false
 Type=Application
 Categories=Utility;Graphics;Photography;
 Keywords=screenshot;capture;lightshot;localshot;screen;snip;
 StartupNotify=false
+StartupWMClass=localshot-overlay
+Actions=Area;Full;
+
+[Desktop Action Area]
+Name=Take Area Screenshot
+Exec=localshot --area
+
+[Desktop Action Full]
+Name=Capture Full Screen
+Exec=localshot --full

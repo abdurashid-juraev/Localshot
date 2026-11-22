@@ -10,31 +10,48 @@ license = "MIT"
 slint = { version = "1.8", default-features = true }
 xcap = { version = "0.0.14", features = ["vendored"] }
 arboard = "3.4"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 zeroize = { version = "1.8", features = ["alloc"] }
 dirs = "6.0"
 rfd = "0.15"
 ureq = { version = "2.10", features = ["json"] }
 serde_json = "1.0"
 parking_lot = "0.12"
+interprocess = { version = "2.4.9", default-features = false }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+tiny-skia = "0.12"
+ab_glyph = "0.2.32"
+fontdb = "0.24.0"
+minisign-verify = "0.3.0"
+
+[features]
+default = []
+loupe = []
+portal-shortcuts = ["dep:ashpd"]
+layer-shell = []
 
 [profile.release]
 opt-level = 3
-lto = true
+lto = "thin"
 codegen-units = 1
-panic = "abort"
-strip = true
+panic = "unwind"
+strip = "symbols"
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 global-hotkey = "0.8.0"
 tray-icon = "0.25.1"
 muda = "0.20.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 xcb = "1.4"
+gtk = "0.18"
+ashpd = { version = "0.11.1", default-features = false, optional = true }
 
 [build-dependencies]
 slint-build = "1.8"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56.0"

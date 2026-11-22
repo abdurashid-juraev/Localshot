@@ -1,13 +1,64 @@
+use minisign_verify::{PublicKey, Signature};
 use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+use std::collections::hash_map::RandomState;
 use std::fs;
+use std::hash::{BuildHasher, Hasher};
+use std::io::Read;
 #[cfg(target_os = "windows")]
-use std::io;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const GITHUB_REPO: &str = "abdurashid-juraev/Localshot";
 const USER_AGENT: &str = "LocalShot-DesktopApp";
 const AUTO_CHECK_COOLDOWN_SECS: u64 = 86400; // 24 hours
+const MAX_REDIRECT_HOPS: usize = 5;
+const MAX_INSTALLER_BYTES: u64 = 200 * 1024 * 1024; // 200 MB
+const MAX_SIGNATURE_BYTES: u64 = 64 * 1024; // 64 KB
+const ALLOWED_DOWNLOAD_HOSTS: &[&str] = &[
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];
+
+/// Embedded Minisign public key used to verify downloaded Windows installers.
+/// Maintainers must replace this with their production `minisign.pub` key
+/// before publishing signed releases (see `docs/code-signing.md`).
+pub const UPDATER_MINISIGN_PUBKEY: &str =
+    "RWRisCjLJ4GrDuQhZmTrxykjdhb8BpOkMyVkLiixv3xcqVX2ycFIfcvS";
+
+/// Pure check for whether the self-updater should be disabled in package-managed
+/// (`/usr/...`) or AppImage environments unless `LOCALSHOT_ALLOW_UPDATER` is set.
+pub fn is_updater_disabled_with(
+    exe_path: Option<&std::path::Path>,
+    appimage_env: Option<&str>,
+    allow_env: Option<&str>,
+) -> bool {
+    if let Some(allow) = allow_env {
+        let v = allow.trim();
+        if v == "1" || v.eq_ignore_ascii_case("true") {
+            return false;
+        }
+    }
+    if appimage_env.is_some_and(|v| !v.trim().is_empty()) {
+        return true;
+    }
+    if let Some(path) = exe_path {
+        if path.starts_with("/usr") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns true if the updater is disabled for the current runtime environment.
+pub fn is_updater_disabled() -> bool {
+    let exe = std::env::current_exe().ok();
+    let appimage = std::env::var("APPIMAGE").ok();
+    let allow = std::env::var("LOCALSHOT_ALLOW_UPDATER").ok();
+    is_updater_disabled_with(exe.as_deref(), appimage.as_deref(), allow.as_deref())
+}
 
 fn get_last_check_file() -> Option<PathBuf> {
     dirs::cache_dir()
@@ -148,19 +199,331 @@ pub fn is_newer_version(remote_ver: &str, local_ver: &str) -> bool {
     }
 }
 
-/// Checks for updates against GitHub Releases API.
-/// If `interactive` is true, shows feedback dialogs even if already up to date or if error occurs.
+/// Returns the cache directory used for staged update downloads.
+pub fn updates_cache_dir() -> Option<PathBuf> {
+    dirs::cache_dir()
+        .or_else(dirs::data_local_dir)
+        .map(|p| p.join("localshot").join("updates"))
+}
+
+/// Generates an unpredictable filename for a downloaded installer.
+pub fn random_update_filename() -> String {
+    let h1 = RandomState::new().build_hasher().finish();
+    let h2 = RandomState::new().build_hasher().finish();
+    format!("localshot-update-{:016x}{:016x}.exe", h1, h2)
+}
+
+/// Computes the exact expected Windows installer asset name for a release tag.
+pub fn expected_installer_asset_name(tag: &str) -> Option<String> {
+    let version = tag.trim().trim_start_matches(['v', 'V']).trim();
+    if version.is_empty()
+        || version.contains('/')
+        || version.contains('\\')
+        || version.contains("..")
+    {
+        return None;
+    }
+    Some(format!("LocalShot-Setup-{}-x64.exe", version))
+}
+
+/// Selects the exact `(installer_url, signature_url)` pair from GitHub release assets.
+/// Returns `None` if either the exact installer or its `.minisig` file is missing.
+pub fn select_release_assets(assets: &[serde_json::Value], tag: &str) -> Option<(String, String)> {
+    let exe_name = expected_installer_asset_name(tag)?;
+    let sig_name = format!("{}.minisig", exe_name);
+
+    let mut exe_url: Option<String> = None;
+    let mut sig_url: Option<String> = None;
+
+    for asset in assets {
+        let name = asset.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        let url = asset
+            .get("browser_download_url")
+            .and_then(|u| u.as_str())
+            .unwrap_or("");
+        if url.is_empty() {
+            continue;
+        }
+        if name == exe_name {
+            exe_url = Some(url.to_string());
+        } else if name == sig_name {
+            sig_url = Some(url.to_string());
+        }
+    }
+
+    match (exe_url, sig_url) {
+        (Some(exe), Some(sig)) => Some((exe, sig)),
+        _ => None,
+    }
+}
+
+/// Validates that `url` uses HTTPS and targets an allowlisted host.
+pub fn validate_download_url(url: &str, allowed_hosts: &[&str]) -> Result<(), String> {
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or_else(|| "Only HTTPS download URLs are allowed".to_string())?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return Err("Invalid download URL authority".to_string());
+    }
+    let host = if let Some((h, port)) = authority.split_once(':') {
+        if port != "443" {
+            return Err("Non-standard HTTPS port is not allowed".to_string());
+        }
+        h
+    } else {
+        authority
+    };
+    let host_lower = host.to_ascii_lowercase();
+    if allowed_hosts
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(&host_lower))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "Host '{}' is not in download allowlist",
+            host_lower
+        ))
+    }
+}
+
+fn resolve_redirect_url(current_url: &str, location: &str) -> Result<String, String> {
+    if location.starts_with("https://") {
+        return Ok(location.to_string());
+    }
+    if location.starts_with('/') {
+        let rest = current_url
+            .strip_prefix("https://")
+            .ok_or_else(|| "Current URL is not HTTPS".to_string())?;
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        if authority.is_empty() {
+            return Err("Invalid current URL authority".to_string());
+        }
+        return Ok(format!("https://{}{}", authority, location));
+    }
+    Err("Unsupported or insecure redirect location".to_string())
+}
+
+fn fetch_with_validated_redirects(
+    initial_url: &str,
+    allowed_hosts: &[&str],
+    max_hops: usize,
+) -> Result<ureq::Response, String> {
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(std::time::Duration::from_secs(30))
+        .build();
+
+    let mut current_url = initial_url.to_string();
+    for _ in 0..=max_hops {
+        validate_download_url(&current_url, allowed_hosts)?;
+        let resp = agent
+            .get(&current_url)
+            .set("User-Agent", USER_AGENT)
+            .call()
+            .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+        let status = resp.status();
+        if (200..=299).contains(&status) {
+            return Ok(resp);
+        }
+        if (300..=399).contains(&status) {
+            let loc = resp
+                .header("Location")
+                .ok_or_else(|| "Redirect missing Location header".to_string())?;
+            current_url = resolve_redirect_url(&current_url, loc)?;
+            continue;
+        }
+        return Err(format!("Unexpected HTTP status: {}", status));
+    }
+
+    Err("Too many redirects".to_string())
+}
+
+/// Verifies an in-memory payload against a Minisign public key and detached signature.
+#[allow(dead_code)]
+pub fn verify_minisign_bytes(pub_key_b64: &str, data: &[u8], sig_text: &str) -> Result<(), String> {
+    let pk = PublicKey::from_base64(pub_key_b64.trim())
+        .map_err(|e| format!("Invalid embedded public key: {}", e))?;
+    let sig = Signature::decode(sig_text).map_err(|e| format!("Invalid signature: {}", e))?;
+    pk.verify(data, &sig, false)
+        .map_err(|e| format!("Signature verification failed: {}", e))
+}
+
+/// Streams a file and verifies its Minisign signature without loading the whole file into memory.
+pub fn verify_minisign_file(
+    pub_key_b64: &str,
+    file_path: &Path,
+    sig_text: &str,
+) -> Result<(), String> {
+    let pk = PublicKey::from_base64(pub_key_b64.trim())
+        .map_err(|e| format!("Invalid embedded public key: {}", e))?;
+    let sig = Signature::decode(sig_text).map_err(|e| format!("Invalid signature: {}", e))?;
+    let mut verifier = pk
+        .verify_stream(&sig)
+        .map_err(|e| format!("Unable to initialize stream verifier: {}", e))?;
+
+    let mut file = fs::File::open(file_path).map_err(|e| format!("Open file failed: {}", e))?;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("Read file failed: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        verifier.update(&buf[..n]);
+    }
+    verifier
+        .finalize()
+        .map_err(|e| format!("Signature verification failed: {}", e))
+}
+
+fn read_response_limited(resp: ureq::Response, max_bytes: u64) -> Result<Vec<u8>, String> {
+    if let Some(len_str) = resp.header("Content-Length") {
+        if let Ok(len) = len_str.trim().parse::<u64>() {
+            if len > max_bytes {
+                return Err(format!("Response exceeds {} byte limit", max_bytes));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut reader = resp.into_reader().take(max_bytes + 1);
+    reader
+        .read_to_end(&mut out)
+        .map_err(|e| format!("Failed reading response: {}", e))?;
+    if out.len() as u64 > max_bytes {
+        return Err(format!("Response exceeds {} byte limit", max_bytes));
+    }
+    Ok(out)
+}
+
+#[cfg(target_os = "windows")]
+fn download_to_file_limited(
+    resp: ureq::Response,
+    dest: &Path,
+    max_bytes: u64,
+) -> Result<(), String> {
+    if let Some(len_str) = resp.header("Content-Length") {
+        if let Ok(len) = len_str.trim().parse::<u64>() {
+            if len > max_bytes {
+                return Err(format!("Installer exceeds {} byte limit", max_bytes));
+            }
+        }
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed creating cache dir: {}", e))?;
+    }
+    let mut file =
+        fs::File::create(dest).map_err(|e| format!("Failed creating update file: {}", e))?;
+    let mut reader = resp.into_reader();
+    let mut buf = [0u8; 64 * 1024];
+    let mut total: u64 = 0;
+
+    let write_res: Result<(), String> = (|| {
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| format!("Download read error: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            total = total.saturating_add(n as u64);
+            if total > max_bytes {
+                return Err(format!("Installer exceeds {} byte limit", max_bytes));
+            }
+            file.write_all(&buf[..n])
+                .map_err(|e| format!("Download write error: {}", e))?;
+        }
+        file.flush()
+            .map_err(|e| format!("Download flush error: {}", e))?;
+        Ok(())
+    })();
+
+    if write_res.is_err() {
+        drop(file);
+        let _ = fs::remove_file(dest);
+    }
+    write_res
+}
+
+fn show_dialog(
+    use_event_loop: bool,
+    title: &str,
+    description: &str,
+    buttons: MessageButtons,
+    level: MessageLevel,
+) -> MessageDialogResult {
+    let title = title.to_string();
+    let description = description.to_string();
+
+    if !use_event_loop {
+        return MessageDialog::new()
+            .set_title(&title)
+            .set_description(&description)
+            .set_buttons(buttons)
+            .set_level(level)
+            .show();
+    }
+
+    let (tx, rx) = mpsc::sync_channel(1);
+    let dispatched = slint::invoke_from_event_loop(move || {
+        let res = MessageDialog::new()
+            .set_title(&title)
+            .set_description(&description)
+            .set_buttons(buttons)
+            .set_level(level)
+            .show();
+        let _ = tx.send(res);
+    });
+
+    if dispatched.is_err() {
+        return MessageDialogResult::Cancel;
+    }
+
+    rx.recv().unwrap_or(MessageDialogResult::Cancel)
+}
+
+/// Checks for updates against GitHub Releases API using the Slint UI thread for dialogs.
 pub fn check_for_updates(interactive: bool) {
+    check_for_updates_with_mode(interactive, true);
+}
+
+/// Checks for updates directly on the calling (main) thread before the Slint event loop starts.
+pub fn check_for_updates_direct(interactive: bool) {
+    check_for_updates_with_mode(interactive, false);
+}
+
+fn check_for_updates_with_mode(interactive: bool, use_event_loop: bool) {
+    if is_updater_disabled() {
+        if interactive {
+            show_dialog(
+                use_event_loop,
+                "LocalShot Update",
+                "Updates are disabled because LocalShot is running from a system package (/usr) or AppImage.\n\
+                Use your package manager to update, or set LOCALSHOT_ALLOW_UPDATER=1 to override.",
+                MessageButtons::Ok,
+                MessageLevel::Info,
+            );
+        }
+        return;
+    }
+
     let current_version = env!("CARGO_PKG_VERSION");
     let api_url = format!(
         "https://api.github.com/repos/{}/releases/latest",
         GITHUB_REPO
     );
 
-    let response = ureq::get(&api_url)
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+    let response = agent
+        .get(&api_url)
         .set("User-Agent", USER_AGENT)
         .set("Accept", "application/vnd.github.v3+json")
-        .timeout(std::time::Duration::from_secs(10))
         .call();
 
     let json: serde_json::Value = match response {
@@ -168,27 +531,29 @@ pub fn check_for_updates(interactive: bool) {
             Ok(val) => val,
             Err(e) => {
                 if interactive {
-                    MessageDialog::new()
-                        .set_title("LocalShot Update")
-                        .set_description(format!("Failed to parse release information:\n{}", e))
-                        .set_buttons(MessageButtons::Ok)
-                        .set_level(MessageLevel::Error)
-                        .show();
+                    show_dialog(
+                        use_event_loop,
+                        "LocalShot Update",
+                        &format!("Failed to parse release information:\n{}", e),
+                        MessageButtons::Ok,
+                        MessageLevel::Error,
+                    );
                 }
                 return;
             }
         },
         Err(e) => {
             if interactive {
-                MessageDialog::new()
-                    .set_title("LocalShot Update")
-                    .set_description(format!(
+                show_dialog(
+                    use_event_loop,
+                    "LocalShot Update",
+                    &format!(
                         "Could not connect to update server.\nPlease check your internet connection.\n\nError: {}",
                         e
-                    ))
-                    .set_buttons(MessageButtons::Ok)
-                    .set_level(MessageLevel::Warning)
-                    .show();
+                    ),
+                    MessageButtons::Ok,
+                    MessageLevel::Warning,
+                );
             }
             return;
         }
@@ -198,12 +563,13 @@ pub fn check_for_updates(interactive: bool) {
         Some(tag) => tag.to_string(),
         None => {
             if interactive {
-                MessageDialog::new()
-                    .set_title("LocalShot Update")
-                    .set_description("Could not find release version in server response.")
-                    .set_buttons(MessageButtons::Ok)
-                    .set_level(MessageLevel::Warning)
-                    .show();
+                show_dialog(
+                    use_event_loop,
+                    "LocalShot Update",
+                    "Could not find release version in server response.",
+                    MessageButtons::Ok,
+                    MessageLevel::Warning,
+                );
             }
             return;
         }
@@ -219,15 +585,16 @@ pub fn check_for_updates(interactive: bool) {
 
     if !is_newer_version(&latest_tag, current_version) {
         if interactive {
-            MessageDialog::new()
-                .set_title("LocalShot - Up to Date")
-                .set_description(format!(
+            show_dialog(
+                use_event_loop,
+                "LocalShot - Up to Date",
+                &format!(
                     "You are already using the latest version of LocalShot (v{}).\nNo updates needed!",
                     current_version
-                ))
-                .set_buttons(MessageButtons::Ok)
-                .set_level(MessageLevel::Info)
-                .show();
+                ),
+                MessageButtons::Ok,
+                MessageLevel::Info,
+            );
         }
         return;
     }
@@ -251,59 +618,72 @@ pub fn check_for_updates(interactive: bool) {
 
     prompt_desc.push_str("Would you like to download and install the update now?");
 
-    let user_choice = MessageDialog::new()
-        .set_title("LocalShot Update Available")
-        .set_description(&prompt_desc)
-        .set_buttons(MessageButtons::YesNo)
-        .set_level(MessageLevel::Info)
-        .show();
+    let user_choice = show_dialog(
+        use_event_loop,
+        "LocalShot Update Available",
+        &prompt_desc,
+        MessageButtons::YesNo,
+        MessageLevel::Info,
+    );
 
     if user_choice != MessageDialogResult::Yes {
         return;
     }
 
-    // Check release assets for Windows installer
-    #[cfg(target_os = "windows")]
-    let mut installer_url: Option<String> = None;
     #[cfg(target_os = "windows")]
     if let Some(assets_list) = json.get("assets").and_then(|a| a.as_array()) {
-        for asset in assets_list {
-            let name = asset.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let url = asset
-                .get("browser_download_url")
-                .and_then(|u| u.as_str())
-                .unwrap_or("");
+        if let Some((installer_url, sig_url)) = select_release_assets(assets_list, &latest_tag) {
+            if let Some(cache_dir) = updates_cache_dir() {
+                let staged_installer = cache_dir.join(random_update_filename());
+                let update_result: Result<(), String> = (|| {
+                    let sig_resp = fetch_with_validated_redirects(
+                        &sig_url,
+                        ALLOWED_DOWNLOAD_HOSTS,
+                        MAX_REDIRECT_HOPS,
+                    )?;
+                    let sig_bytes = read_response_limited(sig_resp, MAX_SIGNATURE_BYTES)?;
+                    let sig_text = String::from_utf8(sig_bytes)
+                        .map_err(|_| "Signature file is not valid UTF-8".to_string())?;
 
-            if name.ends_with(".exe")
-                && (name.contains("Setup")
-                    || name.contains("installer")
-                    || name.contains("LocalShot"))
-            {
-                installer_url = Some(url.to_string());
-                break;
-            }
-        }
-    }
+                    let exe_resp = fetch_with_validated_redirects(
+                        &installer_url,
+                        ALLOWED_DOWNLOAD_HOSTS,
+                        MAX_REDIRECT_HOPS,
+                    )?;
+                    download_to_file_limited(exe_resp, &staged_installer, MAX_INSTALLER_BYTES)?;
 
-    // On Windows, if installer .exe is found, download and launch it
-    #[cfg(target_os = "windows")]
-    if let Some(download_url) = installer_url {
-        let temp_installer = std::env::temp_dir().join("LocalShot-Setup-Update.exe");
+                    if let Err(err) =
+                        verify_minisign_file(UPDATER_MINISIGN_PUBKEY, &staged_installer, &sig_text)
+                    {
+                        let _ = fs::remove_file(&staged_installer);
+                        return Err(err);
+                    }
+                    Ok(())
+                })();
 
-        let download_result = (|| -> Result<(), Box<dyn std::error::Error>> {
-            let resp = ureq::get(&download_url)
-                .set("User-Agent", USER_AGENT)
-                .call()?;
-            let mut reader = resp.into_reader();
-            let mut file = fs::File::create(&temp_installer)?;
-            io::copy(&mut reader, &mut file)?;
-            Ok(())
-        })();
-
-        if download_result.is_ok() && temp_installer.exists() {
-            let launched = std::process::Command::new(&temp_installer).spawn();
-            if launched.is_ok() {
-                std::process::exit(0);
+                match update_result {
+                    Ok(()) => {
+                        if std::process::Command::new(&staged_installer)
+                            .spawn()
+                            .is_ok()
+                        {
+                            std::process::exit(0);
+                        }
+                    }
+                    Err(err) => {
+                        let _ = fs::remove_file(&staged_installer);
+                        show_dialog(
+                            use_event_loop,
+                            "LocalShot Update Failed",
+                            &format!(
+                                "Update verification or download failed:\n{}\n\nOpening release page in browser instead.",
+                                err
+                            ),
+                            MessageButtons::Ok,
+                            MessageLevel::Error,
+                        );
+                    }
+                }
             }
         }
     }
@@ -314,6 +694,9 @@ pub fn check_for_updates(interactive: bool) {
 
 /// Automatically checks for updates in background once every 24 hours.
 pub fn check_for_updates_auto() {
+    if !crate::config::load_user_config().auto_update_check {
+        return;
+    }
     if !should_check_auto() {
         return;
     }
@@ -323,6 +706,9 @@ pub fn check_for_updates_auto() {
 /// Spawns a non-blocking background thread with a 3-second startup delay
 /// ensuring zero startup latency for the main application.
 pub fn spawn_background_update_check() {
+    if is_updater_disabled() || !crate::config::load_user_config().auto_update_check {
+        return;
+    }
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_secs(3));
         check_for_updates_auto();
@@ -369,5 +755,159 @@ mod tests {
         assert!(formatted.contains("Fix overlay drift"));
         assert!(formatted.contains("Add multi-monitor support"));
         assert!(formatted.contains("Improve drawing tools"));
+    }
+
+    #[test]
+    fn test_is_updater_disabled_with() {
+        use std::path::Path;
+        assert!(is_updater_disabled_with(
+            Some(Path::new("/usr/bin/localshot")),
+            None,
+            None
+        ));
+        assert!(is_updater_disabled_with(
+            Some(Path::new("/usr/local/bin/localshot")),
+            None,
+            None
+        ));
+        assert!(is_updater_disabled_with(
+            Some(Path::new("/home/user/.local/bin/localshot")),
+            Some("/tmp/LocalShot.AppImage"),
+            None
+        ));
+        assert!(!is_updater_disabled_with(
+            Some(Path::new("/home/user/.local/bin/localshot")),
+            None,
+            None
+        ));
+        assert!(!is_updater_disabled_with(
+            Some(Path::new("/usr/bin/localshot")),
+            Some("/tmp/LocalShot.AppImage"),
+            Some("1")
+        ));
+        assert!(!is_updater_disabled_with(
+            Some(Path::new("/usr/bin/localshot")),
+            None,
+            Some("true")
+        ));
+    }
+
+    #[test]
+    fn test_asset_selection_exact_pattern() {
+        let assets = vec![
+            serde_json::json!({
+                "name": "LocalShot-Setup-other.exe",
+                "browser_download_url": "https://github.com/org/repo/releases/download/v0.2.0/LocalShot-Setup-other.exe"
+            }),
+            serde_json::json!({
+                "name": "LocalShot-Setup-0.2.0-x64.exe",
+                "browser_download_url": "https://github.com/org/repo/releases/download/v0.2.0/LocalShot-Setup-0.2.0-x64.exe"
+            }),
+            serde_json::json!({
+                "name": "LocalShot-Setup-0.2.0-x64.exe.minisig",
+                "browser_download_url": "https://github.com/org/repo/releases/download/v0.2.0/LocalShot-Setup-0.2.0-x64.exe.minisig"
+            }),
+        ];
+
+        let selected = select_release_assets(&assets, "v0.2.0").expect("exact assets must match");
+        assert_eq!(
+            selected.0,
+            "https://github.com/org/repo/releases/download/v0.2.0/LocalShot-Setup-0.2.0-x64.exe"
+        );
+        assert_eq!(
+            selected.1,
+            "https://github.com/org/repo/releases/download/v0.2.0/LocalShot-Setup-0.2.0-x64.exe.minisig"
+        );
+
+        // Missing .minisig must be rejected
+        let unsigned_only = vec![assets[1].clone()];
+        assert_eq!(select_release_assets(&unsigned_only, "v0.2.0"), None);
+
+        // Loose name without exact version must be rejected
+        let loose_only = vec![assets[0].clone(), assets[2].clone()];
+        assert_eq!(select_release_assets(&loose_only, "v0.2.0"), None);
+
+        // Path traversal tag must be rejected
+        assert_eq!(expected_installer_asset_name("../0.2.0"), None);
+    }
+
+    #[test]
+    fn test_host_allowlist_and_https() {
+        assert!(validate_download_url(
+            "https://github.com/abdurashid-juraev/Localshot/releases/download/v0.2.0/LocalShot-Setup-0.2.0-x64.exe",
+            ALLOWED_DOWNLOAD_HOSTS
+        )
+        .is_ok());
+        assert!(validate_download_url(
+            "https://objects.githubusercontent.com/github-production-release-asset-123/file.exe",
+            ALLOWED_DOWNLOAD_HOSTS
+        )
+        .is_ok());
+        assert!(validate_download_url(
+            "https://release-assets.githubusercontent.com/some/path",
+            ALLOWED_DOWNLOAD_HOSTS
+        )
+        .is_ok());
+
+        // HTTP, spoofing, non-allowlisted hosts, and custom ports must fail
+        assert!(
+            validate_download_url("http://github.com/file.exe", ALLOWED_DOWNLOAD_HOSTS).is_err()
+        );
+        assert!(validate_download_url(
+            "https://github.com@evil.example/file.exe",
+            ALLOWED_DOWNLOAD_HOSTS
+        )
+        .is_err());
+        assert!(
+            validate_download_url("https://evil.github.com/file.exe", ALLOWED_DOWNLOAD_HOSTS)
+                .is_err()
+        );
+        assert!(
+            validate_download_url("https://github.com:8443/file.exe", ALLOWED_DOWNLOAD_HOSTS)
+                .is_err()
+        );
+        assert!(resolve_redirect_url(
+            "https://github.com/a",
+            "http://objects.githubusercontent.com/b"
+        )
+        .is_err());
+        assert_eq!(
+            resolve_redirect_url("https://github.com/a", "/b/c").unwrap(),
+            "https://github.com/b/c"
+        );
+    }
+
+    #[test]
+    fn test_minisign_verification_rejects_tampered_file() {
+        let sig_text = "untrusted comment: signature from minisign secret key\n\
+            RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=\n\
+            trusted comment: timestamp:1556193335\tfile:test\n\
+            y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+bHwhEBg==";
+
+        // Valid payload passes
+        assert!(verify_minisign_bytes(UPDATER_MINISIGN_PUBKEY, b"test", sig_text).is_ok());
+
+        // Tampered payload in file fails
+        let tmp_dir =
+            std::env::temp_dir().join(format!("localshot_upd_test_{}", std::process::id()));
+        let _ = fs::create_dir_all(&tmp_dir);
+        let valid_file = tmp_dir.join("valid.bin");
+        let tampered_file = tmp_dir.join("tampered.bin");
+        fs::write(&valid_file, b"test").unwrap();
+        fs::write(&tampered_file, b"test-tampered").unwrap();
+
+        assert!(verify_minisign_file(UPDATER_MINISIGN_PUBKEY, &valid_file, sig_text).is_ok());
+        assert!(verify_minisign_file(UPDATER_MINISIGN_PUBKEY, &tampered_file, sig_text).is_err());
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_random_update_filename_is_unpredictable() {
+        let a = random_update_filename();
+        let b = random_update_filename();
+        assert!(a.starts_with("localshot-update-"));
+        assert!(a.ends_with(".exe"));
+        assert_ne!(a, b);
     }
 }
