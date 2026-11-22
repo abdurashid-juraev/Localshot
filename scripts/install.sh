@@ -16,10 +16,8 @@ if ! command -v cargo >/dev/null 2>&1; then
     fi
 fi
 
-if [ ! -f "$DIR/target/release/localshot" ]; then
-    echo "Building release binary..."
-    cargo build --release --manifest-path "$DIR/Cargo.toml"
-fi
+echo "Building release binary..."
+cargo build --release --manifest-path "$DIR/Cargo.toml"
 
 mkdir -p "$BIN_DIR" "$APP_DIR" "$ICON_DIR" "$AUTOSTART_DIR"
 
