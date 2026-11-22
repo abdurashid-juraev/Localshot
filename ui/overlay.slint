@@ -1,45 +1,18 @@
-component ResizeHandle inherits Rectangle {
-    in property <color> handle-color: #0088ff;
-    in property <MouseCursor> cursor: default;
-    callback dragged(length, length);
-    callback released();
+export struct TouchModifiers {
+    control: bool,
+    shift: bool,
+    alt: bool,
+}
 
+component ResizeHandleDot inherits Rectangle {
     width: 10px;
     height: 10px;
     background: #ffffff;
-    border-color: root.handle-color;
+    border-color: #0088ff;
     border-width: 1.5px;
     border-radius: 2px;
     drop-shadow-blur: 3px;
     drop-shadow-color: #00000066;
-
-    TouchArea {
-        x: -5px;
-        y: -5px;
-        width: 20px;
-        height: 20px;
-        mouse-cursor: root.cursor;
-        property <length> grab-x: 0px;
-        property <length> grab-y: 0px;
-        property <bool> is-dragging: false;
-
-        pointer-event(event) => {
-            if (event.kind == PointerEventKind.down) {
-                self.grab-x = self.mouse-x;
-                self.grab-y = self.mouse-y;
-                self.is-dragging = true;
-            } else if (event.kind == PointerEventKind.up) {
-                self.is-dragging = false;
-                root.released();
-            }
-        }
-
-        moved => {
-            if (self.is-dragging) {
-                root.dragged(self.mouse-x - self.grab-x, self.mouse-y - self.grab-y);
-            }
-        }
-    }
 }
 
 component ToolButton inherits Rectangle {
@@ -172,6 +145,7 @@ component ColorDot inherits Rectangle {
 }
 
 export component OverlayWindow inherits Window {
+    title: "localshot-overlay";
     in-out property <image> background-image;
     in-out property <bool> is-selecting: false;
     in-out property <bool> has-selection: false;
@@ -186,19 +160,31 @@ export component OverlayWindow inherits Window {
     // Active color index: 0=Red, 1=Blue, 2=Green, 3=Yellow, 4=White, 5=Black
     in-out property <int> active-color-idx: 0;
 
+    // Cursor driven dynamically by Rust hit-testing
+    in-out property <string> cursor-name: "crosshair";
+
+    // Dual toolbar positions computed by Rust pure function
+    in-out property <bool> show-toolbars: false;
+    in-out property <length> vert-toolbar-x: 0px;
+    in-out property <length> vert-toolbar-y: 0px;
+    in-out property <length> horiz-toolbar-x: 0px;
+    in-out property <length> horiz-toolbar-y: 0px;
+
     callback close-requested();
     callback copy-requested();
     callback save-requested();
     callback undo-requested();
+    callback redo-requested();
     callback tool-selected(string);
     callback color-selected(int);
 
-    callback selection-changed(length, length, length, length);
-    callback selection-finished(length, length, length, length);
+    // Single unified interaction callbacks
+    callback touch-event(string, length, length, TouchModifiers, bool);
+    callback key-event(string, bool, bool, bool);
+    callback escape-pressed();
 
-    callback draw-started(length, length);
-    callback draw-moved(length, length);
-    callback draw-finished(length, length);
+    // Direct keyboard focus to key-handler on every show
+    forward-focus: key-handler;
 
     public function toggle-tool(tool: string) {
         root.active-tool = root.active-tool == tool ? "select" : tool;
@@ -210,37 +196,15 @@ export component OverlayWindow inherits Window {
         root.color-selected(idx);
     }
 
-    public function resize-selection(dx: length, dy: length, adj-l: bool, adj-t: bool, adj-r: bool, adj-b: bool) {
-        if (adj-l) {
-            let nw = root.sel-w - dx;
-            let nx = root.sel-x + dx;
-            if (nw >= 16px && nx >= 0px) { root.sel-x = nx; root.sel-w = nw; }
-        }
-        if (adj-r) {
-            let nw = root.sel-w + dx;
-            if (nw >= 16px && root.sel-x + nw <= root.width) { root.sel-w = nw; }
-        }
-        if (adj-t) {
-            let nh = root.sel-h - dy;
-            let ny = root.sel-y + dy;
-            if (nh >= 16px && ny >= 0px) { root.sel-y = ny; root.sel-h = nh; }
-        }
-        if (adj-b) {
-            let nh = root.sel-h + dy;
-            if (nh >= 16px && root.sel-y + nh <= root.height) { root.sel-h = nh; }
-        }
-        root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
-    }
-
     no-frame: true;
     always-on-top: true;
-    full-screen: true;
 
-    // Desktop background
+    // Desktop background (rendered 1:1)
     Image {
         width: 100%;
         height: 100%;
         source: root.background-image;
+        image-rendering: pixelated;
     }
 
     // Dimmed overlay
@@ -250,60 +214,38 @@ export component OverlayWindow inherits Window {
         background: #00000080;
     }
 
-    // Global Selection Drag Area (placed behind cutout viewport & resize handles)
+    // Single Full-Window Interaction TouchArea
     TouchArea {
         width: 100%;
         height: 100%;
-        mouse-cursor: crosshair;
-
-        property <length> origin-x: 0px;
-        property <length> origin-y: 0px;
+        mouse-cursor: root.cursor-name == "crosshair" ? crosshair : (
+            root.cursor-name == "move" ? move : (
+                root.cursor-name == "nwse-resize" ? nwse-resize : (
+                    root.cursor-name == "nesw-resize" ? nesw-resize : (
+                        root.cursor-name == "ns-resize" ? ns-resize : (
+                            root.cursor-name == "ew-resize" ? ew-resize : default
+                        )
+                    )
+                )
+            )
+        );
 
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
-                self.origin-x = self.mouse-x;
-                self.origin-y = self.mouse-y;
-                root.is-selecting = true;
-                root.has-selection = false;
-                root.sel-x = self.mouse-x;
-                root.sel-y = self.mouse-y;
-                root.sel-w = 0px;
-                root.sel-h = 0px;
-            } else if (event.kind == PointerEventKind.up) {
-                root.is-selecting = false;
-                if (root.sel-w > 10px && root.sel-h > 10px) {
-                    root.has-selection = true;
-                    root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
-                } else {
-                    root.has-selection = false;
-                }
+                root.touch-event("down", self.mouse-x, self.mouse-y, { control: event.modifiers.control, shift: event.modifiers.shift, alt: event.modifiers.alt }, self.pressed);
+            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                root.touch-event("up", self.mouse-x, self.mouse-y, { control: event.modifiers.control, shift: event.modifiers.shift, alt: event.modifiers.alt }, self.pressed);
+            } else if (event.kind == PointerEventKind.move) {
+                root.touch-event("move", self.mouse-x, self.mouse-y, { control: event.modifiers.control, shift: event.modifiers.shift, alt: event.modifiers.alt }, self.pressed);
             }
         }
 
         moved => {
-            if (root.is-selecting) {
-                if (self.mouse-x >= self.origin-x) {
-                    root.sel-x = self.origin-x;
-                    root.sel-w = self.mouse-x - self.origin-x;
-                } else {
-                    root.sel-x = self.mouse-x;
-                    root.sel-w = self.origin-x - self.mouse-x;
-                }
-
-                if (self.mouse-y >= self.origin-y) {
-                    root.sel-y = self.origin-y;
-                    root.sel-h = self.mouse-y - self.origin-y;
-                } else {
-                    root.sel-y = self.mouse-y;
-                    root.sel-h = self.origin-y - self.mouse-y;
-                }
-
-                root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
-            }
+            root.touch-event("move", self.mouse-x, self.mouse-y, { control: false, shift: false, alt: false }, self.pressed);
         }
     }
 
-    // Cutout Viewport
+    // Cutout Viewport (1:1 unscaled desktop rendering through cutout)
     if root.has-selection || root.is-selecting : Rectangle {
         x: root.sel-x;
         y: root.sel-y;
@@ -317,6 +259,7 @@ export component OverlayWindow inherits Window {
             width: root.width;
             height: root.height;
             source: root.background-image;
+            image-rendering: pixelated;
         }
 
         // Selection border
@@ -325,56 +268,6 @@ export component OverlayWindow inherits Window {
             height: 100%;
             border-color: #0088ff;
             border-width: 1.5px;
-        }
-
-        // In-selection moving touch area (active when in "select" tool mode)
-        if root.has-selection && root.active-tool == "select" : TouchArea {
-            width: 100%;
-            height: 100%;
-            mouse-cursor: move;
-
-            property <length> grab-x: 0px;
-            property <length> grab-y: 0px;
-            property <bool> is-moving: false;
-
-            pointer-event(event) => {
-                if (event.kind == PointerEventKind.down) {
-                    self.grab-x = self.mouse-x;
-                    self.grab-y = self.mouse-y;
-                    self.is-moving = true;
-                } else if (event.kind == PointerEventKind.up) {
-                    self.is-moving = false;
-                    root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
-                }
-            }
-
-            moved => {
-                if (self.is-moving) {
-                    let new-x = root.sel-x + (self.mouse-x - self.grab-x);
-                    let new-y = root.sel-y + (self.mouse-y - self.grab-y);
-                    root.sel-x = max(0px, min(new-x, root.width - root.sel-w));
-                    root.sel-y = max(0px, min(new-y, root.height - root.sel-h));
-                    root.selection-changed(root.sel-x, root.sel-y, root.sel-w, root.sel-h);
-                }
-            }
-        }
-
-        // In-selection drawing touch area (active when an annotation tool is selected)
-        if root.has-selection && root.active-tool != "select" : TouchArea {
-            width: 100%;
-            height: 100%;
-
-            pointer-event(event) => {
-                if (event.kind == PointerEventKind.down) {
-                    root.draw-started(self.mouse-x, self.mouse-y);
-                } else if (event.kind == PointerEventKind.up) {
-                    root.draw-finished(self.mouse-x, self.mouse-y);
-                }
-            }
-
-            moved => {
-                root.draw-moved(self.mouse-x, self.mouse-y);
-            }
         }
     }
 
@@ -401,7 +294,7 @@ export component OverlayWindow inherits Window {
         }
     }
 
-    // 8-Point Resize Handles
+    // 8-Point Visual Resize Handles (Pure visual representation; hit testing owned by Rust)
     if root.has-selection && !root.is-selecting && root.active-tool == "select" && root.sel-w > 16px && root.sel-h > 16px : Rectangle {
         x: root.sel-x;
         y: root.sel-y;
@@ -409,76 +302,31 @@ export component OverlayWindow inherits Window {
         height: root.sel-h;
 
         // Top-Left (NW)
-        ResizeHandle {
-            x: -5px; y: -5px; cursor: nwse-resize;
-            dragged(dx, dy) => { root.resize-selection(dx, dy, true, true, false, false); }
-            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
-        }
-
+        ResizeHandleDot { x: -5px; y: -5px; }
         // Top (N)
-        ResizeHandle {
-            x: (parent.width - 10px) / 2; y: -5px; cursor: ns-resize;
-            dragged(_dx, dy) => { root.resize-selection(0px, dy, false, true, false, false); }
-            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
-        }
-
+        ResizeHandleDot { x: (parent.width - 10px) / 2; y: -5px; }
         // Top-Right (NE)
-        ResizeHandle {
-            x: parent.width - 5px; y: -5px; cursor: nesw-resize;
-            dragged(dx, dy) => { root.resize-selection(dx, dy, false, true, true, false); }
-            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
-        }
-
+        ResizeHandleDot { x: parent.width - 5px; y: -5px; }
         // Left (W)
-        ResizeHandle {
-            x: -5px; y: (parent.height - 10px) / 2; cursor: ew-resize;
-            dragged(dx, _dy) => { root.resize-selection(dx, 0px, true, false, false, false); }
-            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
-        }
-
+        ResizeHandleDot { x: -5px; y: (parent.height - 10px) / 2; }
         // Right (E)
-        ResizeHandle {
-            x: parent.width - 5px; y: (parent.height - 10px) / 2; cursor: ew-resize;
-            dragged(dx, _dy) => { root.resize-selection(dx, 0px, false, false, true, false); }
-            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
-        }
-
+        ResizeHandleDot { x: parent.width - 5px; y: (parent.height - 10px) / 2; }
         // Bottom-Left (SW)
-        ResizeHandle {
-            x: -5px; y: parent.height - 5px; cursor: nesw-resize;
-            dragged(dx, dy) => { root.resize-selection(dx, dy, true, false, false, true); }
-            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
-        }
-
+        ResizeHandleDot { x: -5px; y: parent.height - 5px; }
         // Bottom (S)
-        ResizeHandle {
-            x: (parent.width - 10px) / 2; y: parent.height - 5px; cursor: ns-resize;
-            dragged(_dx, dy) => { root.resize-selection(0px, dy, false, false, false, true); }
-            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
-        }
-
+        ResizeHandleDot { x: (parent.width - 10px) / 2; y: parent.height - 5px; }
         // Bottom-Right (SE)
-        ResizeHandle {
-            x: parent.width - 5px; y: parent.height - 5px; cursor: nwse-resize;
-            dragged(dx, dy) => { root.resize-selection(dx, dy, false, false, true, true); }
-            released => { root.selection-finished(root.sel-x, root.sel-y, root.sel-w, root.sel-h); }
-        }
+        ResizeHandleDot { x: parent.width - 5px; y: parent.height - 5px; }
     }
-
-
 
     // ==========================================
     // DUAL TOOLBAR (Lightshot 1:1 Floating Bars)
     // ==========================================
-    if root.has-selection && !root.is-selecting : Rectangle {
-        // Safe position calculation to prevent overflowing screen boundaries
-        property <length> right-edge: root.sel-x + root.sel-w;
-        property <length> bottom-edge: root.sel-y + root.sel-h;
-
-        // --- VERTICAL TOOLBAR (Right of Selection) ---
+    if root.show-toolbars : Rectangle {
+        // --- VERTICAL TOOLBAR ---
         Rectangle {
-            x: (parent.right-edge + 56px <= root.width) ? parent.right-edge + 8px : parent.right-edge - 56px;
-            y: (root.sel-y + 374px <= root.height) ? root.sel-y : (root.height - 380px > 8px ? root.height - 380px : 8px);
+            x: root.vert-toolbar-x;
+            y: root.vert-toolbar-y;
             width: 48px;
             height: 368px;
             background: #1e222bcc;
@@ -487,6 +335,11 @@ export component OverlayWindow inherits Window {
             border-width: 1px;
             drop-shadow-blur: 14px;
             drop-shadow-color: #00000088;
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+            }
 
             VerticalLayout {
                 padding: 4px;
@@ -570,10 +423,10 @@ export component OverlayWindow inherits Window {
             }
         }
 
-        // --- HORIZONTAL TOOLBAR (Bottom of Selection) ---
+        // --- HORIZONTAL TOOLBAR ---
         Rectangle {
-            x: (parent.right-edge - 160px >= 8px) ? parent.right-edge - 160px : 8px;
-            y: (parent.bottom-edge + 52px <= root.height) ? parent.bottom-edge + 8px : parent.bottom-edge - 52px;
+            x: root.horiz-toolbar-x;
+            y: root.horiz-toolbar-y;
             width: 156px;
             height: 46px;
             background: #1e222bcc;
@@ -582,6 +435,11 @@ export component OverlayWindow inherits Window {
             border-width: 1px;
             drop-shadow-blur: 14px;
             drop-shadow-color: #00000088;
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+            }
 
             HorizontalLayout {
                 padding: 4px;
@@ -620,51 +478,17 @@ export component OverlayWindow inherits Window {
     }
 
     // Keyboard Shortcuts
-    ForwardFocus := FocusScope {
+    key-handler := FocusScope {
         key-pressed(event) => {
             if (event.text == Key.Escape) {
-                root.close-requested();
+                root.escape-pressed();
                 accept
             } else if (event.text == Key.Return) {
                 root.copy-requested();
                 accept
-            } else if (event.text == "a" && event.modifiers.control) {
-                root.sel-x = 0px;
-                root.sel-y = 0px;
-                root.sel-w = root.width;
-                root.sel-h = root.height;
-                root.has-selection = true;
-                root.selection-finished(0px, 0px, root.width, root.height);
-                accept
-            } else if (event.text == "c" && event.modifiers.control) {
-                root.copy-requested();
-                accept
-            } else if (event.text == "s" && event.modifiers.control) {
-                root.save-requested();
-                accept
-            } else if (event.text == "z" && event.modifiers.control) {
-                root.undo-requested();
-                accept
-            } else if (event.text == "p" || event.text == "P") {
-                root.toggle-tool("pen");
-                accept
-            } else if (event.text == "l" || event.text == "L") {
-                root.toggle-tool("line");
-                accept
-            } else if (event.text == "a" || event.text == "A") {
-                root.toggle-tool("arrow");
-                accept
-            } else if (event.text == "r" || event.text == "R") {
-                root.toggle-tool("rect");
-                accept
-            } else if (event.text == "m" || event.text == "M") {
-                root.toggle-tool("marker");
-                accept
-            } else if (event.text == "b" || event.text == "B") {
-                root.toggle-tool("redact");
-                accept
             } else {
-                reject
+                root.key-event(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt);
+                accept
             }
         }
     }

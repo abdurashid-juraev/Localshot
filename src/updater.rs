@@ -66,7 +66,7 @@ pub fn format_changelog(body: &str, max_lines: usize, max_chars: usize) -> Strin
             break;
         }
         out.push_str("  • ");
-        let display_line = trimmed.trim_start_matches(|c| c == '-' || c == '*' || c == '•').trim();
+        let display_line = trimmed.trim_start_matches(['-', '*', '•']).trim();
         out.push_str(display_line);
         out.push('\n');
         char_count += display_line.len();
@@ -96,25 +96,54 @@ pub fn open_browser(url: &str) {
     }
 }
 
-/// Parses semantic versions like "v0.1.4" or "0.1.4" into (major, minor, patch)
-pub fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
+/// Parses semantic versions like "v0.1.4", "0.1.4", or "1.0.0-rc1" into
+/// a comparable tuple `(major, minor, patch, is_prerelease)`.
+/// A prerelease (has a `-` suffix on the patch component) sorts OLDER than the
+/// corresponding release, so `1.0.0-rc1 < 1.0.0`.
+fn parse_version_full(v: &str) -> Option<(u32, u32, u32, bool)> {
     let clean = v.trim().trim_start_matches('v');
-    let mut parts = clean.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts
-        .next()?
-        .split(|c: char| !c.is_ascii_digit())
-        .next()?
-        .parse()
-        .ok()?;
+    let mut parts = clean.splitn(3, '.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    let patch_str = parts.next()?;
+
+    // Split on first non-digit to separate numeric patch from prerelease tag
+    let dash = patch_str.find(|c: char| !c.is_ascii_digit());
+    let (patch_num_str, prerelease_tag) = match dash {
+        Some(pos) => (&patch_str[..pos], &patch_str[pos..]),
+        None => (patch_str, ""),
+    };
+    let patch: u32 = patch_num_str.parse().ok()?;
+    let is_prerelease = !prerelease_tag.is_empty();
+    Some((major, minor, patch, is_prerelease))
+}
+
+/// Parses semantic versions like "v0.1.4" or "0.1.4" into (major, minor, patch).
+/// Strips any pre-release suffix from the patch component.
+#[allow(dead_code)]
+pub fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
+    let (major, minor, patch, _) = parse_version_full(v)?;
     Some((major, minor, patch))
 }
 
-/// Checks if `remote_ver` is strictly newer than `local_ver`
+/// Checks if `remote_ver` is strictly newer than `local_ver`.
+/// Item 11: a prerelease (e.g. "1.0.0-rc1") is treated as OLDER than its release ("1.0.0").
 pub fn is_newer_version(remote_ver: &str, local_ver: &str) -> bool {
-    match (parse_version(remote_ver), parse_version(local_ver)) {
-        (Some(remote), Some(local)) => remote > local,
+    match (
+        parse_version_full(remote_ver),
+        parse_version_full(local_ver),
+    ) {
+        (Some((rma, rmi, rpa, rpre)), Some((lma, lmi, lpa, lpre))) => {
+            // Compare (major, minor, patch) first; on tie, non-prerelease > prerelease.
+            match (rma, rmi, rpa).cmp(&(lma, lmi, lpa)) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                std::cmp::Ordering::Equal => {
+                    // Same numeric version: release (false) is newer than prerelease (true)
+                    !rpre && lpre
+                }
+            }
+        }
         _ => false,
     }
 }
@@ -123,7 +152,10 @@ pub fn is_newer_version(remote_ver: &str, local_ver: &str) -> bool {
 /// If `interactive` is true, shows feedback dialogs even if already up to date or if error occurs.
 pub fn check_for_updates(interactive: bool) {
     let current_version = env!("CARGO_PKG_VERSION");
-    let api_url = format!("https://api.github.com/repos/{}/releases/latest", GITHUB_REPO);
+    let api_url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        GITHUB_REPO
+    );
 
     let response = ureq::get(&api_url)
         .set("User-Agent", USER_AGENT)
@@ -138,7 +170,7 @@ pub fn check_for_updates(interactive: bool) {
                 if interactive {
                     MessageDialog::new()
                         .set_title("LocalShot Update")
-                        .set_description(&format!("Failed to parse release information:\n{}", e))
+                        .set_description(format!("Failed to parse release information:\n{}", e))
                         .set_buttons(MessageButtons::Ok)
                         .set_level(MessageLevel::Error)
                         .show();
@@ -150,7 +182,7 @@ pub fn check_for_updates(interactive: bool) {
             if interactive {
                 MessageDialog::new()
                     .set_title("LocalShot Update")
-                    .set_description(&format!(
+                    .set_description(format!(
                         "Could not connect to update server.\nPlease check your internet connection.\n\nError: {}",
                         e
                     ))
@@ -189,7 +221,7 @@ pub fn check_for_updates(interactive: bool) {
         if interactive {
             MessageDialog::new()
                 .set_title("LocalShot - Up to Date")
-                .set_description(&format!(
+                .set_description(format!(
                     "You are already using the latest version of LocalShot (v{}).\nNo updates needed!",
                     current_version
                 ))
@@ -243,7 +275,9 @@ pub fn check_for_updates(interactive: bool) {
                 .unwrap_or("");
 
             if name.ends_with(".exe")
-                && (name.contains("Setup") || name.contains("installer") || name.contains("LocalShot"))
+                && (name.contains("Setup")
+                    || name.contains("installer")
+                    || name.contains("LocalShot"))
             {
                 installer_url = Some(url.to_string());
                 break;
@@ -309,6 +343,23 @@ mod tests {
         assert!(!is_newer_version("v0.1.3", "0.1.4"));
         assert!(is_newer_version("v0.2.0", "0.1.9"));
         assert!(is_newer_version("v1.0.0", "0.9.9"));
+        // Item 11: prerelease is OLDER than the release
+        assert!(
+            !is_newer_version("v1.0.0-rc1", "1.0.0"),
+            "1.0.0-rc1 must be treated as older than 1.0.0"
+        );
+        assert!(
+            is_newer_version("1.0.0", "v1.0.0-rc1"),
+            "1.0.0 must be treated as newer than 1.0.0-rc1"
+        );
+        assert!(
+            !is_newer_version("v1.0.0-beta", "v1.0.0-alpha"),
+            "two prereleases of same version: neither is newer"
+        );
+        assert!(
+            is_newer_version("v1.0.1-rc1", "1.0.0"),
+            "1.0.1-rc1 (prerelease of next) is still newer by numeric version"
+        );
     }
 
     #[test]

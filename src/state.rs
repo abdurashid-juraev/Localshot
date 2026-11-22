@@ -1,6 +1,7 @@
 use crate::capture::CapturedFrame;
 use crate::config;
 use crate::draw::{self, Annotation, Tool};
+use crate::interaction::SelectionMachine;
 use image::RgbaImage;
 use zeroize::Zeroize;
 
@@ -65,6 +66,9 @@ pub struct AppState {
     pub tool: Tool,
     pub color_idx: usize,
     pub selection: SelectionRect,
+    pub machine: SelectionMachine,
+    pub drag_start: (i32, i32),
+    pub initial_rect: SelectionRect,
     pub start_pt: Option<(i32, i32)>,
     pub current_points: Vec<(i32, i32)>,
 }
@@ -96,6 +100,9 @@ impl AppState {
             tool: Tool::Select,
             color_idx: 0,
             selection: SelectionRect::default(),
+            machine: SelectionMachine::Idle,
+            drag_start: (0, 0),
+            initial_rect: SelectionRect::default(),
             start_pt: None,
             current_points: Vec::new(),
         }
@@ -120,19 +127,17 @@ impl AppState {
 
     /// Lazily ensures the composited cache buffer is allocated
     fn ensure_composited(&mut self) -> &mut RgbaImage {
-        if self.composited_cache.is_none() {
-            self.composited_cache = Some(self.raw_base.clone());
-        }
-        self.composited_cache.as_mut().unwrap()
+        let base = &self.raw_base;
+        self.composited_cache.get_or_insert_with(|| base.clone())
     }
 
     /// Lazily ensures the live preview buffer is allocated
     fn ensure_live_preview(&mut self) -> &mut RgbaImage {
         if self.live_preview.is_none() {
-            let base = self.composited_image();
-            self.live_preview = Some(base.clone());
+            let base = self.composited_image().clone();
+            self.live_preview = Some(base);
         }
-        self.live_preview.as_mut().unwrap()
+        self.live_preview.as_mut().unwrap_or(&mut self.raw_base)
     }
 
     pub fn active_color(&self) -> [u8; 4] {
@@ -158,35 +163,58 @@ impl AppState {
         self.live_dirty_rect = None;
     }
 
+    /// Item 2: ignore if start_pt is not set (called on hover before any mouse-down)
     pub fn add_drawing_point(&mut self, x: i32, y: i32) {
-        self.current_points.push((x, y));
+        if self.start_pt.is_some() {
+            self.current_points.push((x, y));
+        }
     }
 
-    /// DRY: Single source of truth for constructing Annotation based on active Tool
+    /// DRY: Single source of truth for constructing Annotation based on active Tool.
+    /// Item 8: returns None for degenerate zero-size / zero-length annotations.
     pub fn build_current_annotation(&self, end_pt: (i32, i32)) -> Option<Annotation> {
         let start = self.start_pt?;
         let color = self.active_color();
 
         match self.tool {
-            Tool::Pen => Some(Annotation::Stroke {
-                points: self.current_points.clone(),
-                color,
-                thickness: config::PEN_THICKNESS,
-            }),
-            Tool::Line => Some(Annotation::Line {
-                start,
-                end: end_pt,
-                color,
-                thickness: config::LINE_THICKNESS,
-            }),
-            Tool::Arrow => Some(Annotation::Arrow {
-                start,
-                end: end_pt,
-                color,
-                thickness: config::ARROW_THICKNESS,
-            }),
+            Tool::Pen => {
+                // A single-point pen click becomes a 1-point stroke (dot) — allowed.
+                Some(Annotation::Stroke {
+                    points: self.current_points.clone(),
+                    color,
+                    thickness: config::PEN_THICKNESS,
+                })
+            }
+            Tool::Line => {
+                // Item 8: reject start == end
+                if start == end_pt {
+                    return None;
+                }
+                Some(Annotation::Line {
+                    start,
+                    end: end_pt,
+                    color,
+                    thickness: config::LINE_THICKNESS,
+                })
+            }
+            Tool::Arrow => {
+                // Item 8: reject start == end
+                if start == end_pt {
+                    return None;
+                }
+                Some(Annotation::Arrow {
+                    start,
+                    end: end_pt,
+                    color,
+                    thickness: config::ARROW_THICKNESS,
+                })
+            }
             Tool::Rectangle => {
                 let (x, y, w, h) = normalize_rect_coords(start, end_pt);
+                // Item 8: reject zero-area rectangles
+                if w == 0 || h == 0 {
+                    return None;
+                }
                 Some(Annotation::Rectangle {
                     x,
                     y,
@@ -203,6 +231,10 @@ impl AppState {
             }),
             Tool::Redact => {
                 let (x, y, w, h) = normalize_rect_coords(start, end_pt);
+                // Item 8: reject zero-area redactions
+                if w == 0 || h == 0 {
+                    return None;
+                }
                 Some(Annotation::Redact {
                     x,
                     y,
@@ -216,15 +248,42 @@ impl AppState {
     }
 
     /// Commits an annotation to history and directly updates the cached composited buffer.
+    /// Item 1: restore live_preview over the UNION of old live_dirty_rect and the annotation's
+    /// bounding_box so that when the final mouse-up point differs from the last move point,
+    /// earlier annotations are not erased from the preview.
     pub fn commit_annotation(&mut self, ann: Annotation) {
+        // Compute the annotation's bounding box BEFORE applying it to the cache.
+        // We need canvas dimensions from either cache or raw_base.
+        let (canvas_w, canvas_h) = if let Some(c) = &self.composited_cache {
+            c.dimensions()
+        } else {
+            self.raw_base.dimensions()
+        };
+        let ann_bbox = ann.bounding_box(canvas_w, canvas_h);
+
         let composited = self.ensure_composited();
         ann.apply(composited);
         self.annotations.push(ann);
-        // Sync live_preview by restoring dirty rect
-        if let Some((rx, ry, rw, rh)) = self.live_dirty_rect.take() {
-            if let (Some(cache), Some(preview)) = (&self.composited_cache, &mut self.live_preview) {
-                draw::copy_rect(cache, preview, rx, ry, rw, rh);
+
+        // Item 1: union old dirty rect with the committed annotation's bounding box so
+        // that any area painted in the final mouse-up pass (outside the last move's dirty
+        // rect) is also restored in live_preview from the freshly-updated composited_cache.
+        let union_rect = match self.live_dirty_rect.take() {
+            None => ann_bbox,
+            Some((rx, ry, rw, rh)) => {
+                let (ax, ay, aw, ah) = ann_bbox;
+                let ux0 = rx.min(ax);
+                let uy0 = ry.min(ay);
+                let ux1 = (rx + rw).max(ax + aw);
+                let uy1 = (ry + rh).max(ay + ah);
+                (ux0, uy0, ux1.saturating_sub(ux0), uy1.saturating_sub(uy0))
             }
+        };
+
+        // Sync live_preview by restoring the union rect from the now-updated composited_cache.
+        if let (Some(cache), Some(preview)) = (&self.composited_cache, &mut self.live_preview) {
+            let (ux, uy, uw, uh) = union_rect;
+            draw::copy_rect(cache, preview, ux, uy, uw, uh);
         }
     }
 
@@ -265,20 +324,27 @@ impl AppState {
         }
 
         if let Some(ann) = live_ann {
-            let preview = self.live_preview.as_mut().unwrap();
-            ann.apply(preview);
-            let bbox = ann.bounding_box(preview.width(), preview.height());
-            self.live_dirty_rect = Some(bbox);
+            if let Some(ref mut preview) = self.live_preview {
+                ann.apply(preview);
+                let bbox = ann.bounding_box(preview.width(), preview.height());
+                self.live_dirty_rect = Some(bbox);
+            }
         }
 
-        self.live_preview.as_ref().unwrap()
+        self.live_preview.as_ref().unwrap_or(&self.raw_base)
     }
 
     /// Produces the final composited and cropped image bounded by the active selection.
+    /// Item 10: forces alpha=255 on all pixels of the cropped result.
     pub fn get_final_crop(&self) -> Option<RgbaImage> {
         let img = self.composited_image();
         let (cx, cy, cw, ch) = self.selection.crop_bounds(img.width(), img.height())?;
-        Some(image::imageops::crop_imm(img, cx, cy, cw, ch).to_image())
+        let mut cropped = image::imageops::crop_imm(img, cx, cy, cw, ch).to_image();
+        // Item 10: force alpha = 255 so PNG/clipboard output is always fully opaque
+        for pixel in cropped.pixels_mut() {
+            pixel[3] = 255;
+        }
+        Some(cropped)
     }
 }
 
@@ -365,5 +431,129 @@ mod tests {
         assert!(state.composited_cache.is_none());
         assert!(state.live_preview.is_none());
         assert!(!state.undo()); // Nothing left to undo
+    }
+
+    /// Item 1: commit a rectangle whose end point lies outside the last preview rect;
+    /// assert live_preview equals composited_image() after commit.
+    #[test]
+    fn test_commit_annotation_union_dirty_rect() {
+        let frame = create_dummy_frame(200, 200);
+        let mut state = AppState::new(frame);
+        state.set_tool(Tool::Rectangle);
+        state.set_color_idx(0); // Red
+
+        // Simulate draw: start at (10,10), preview moves to (30,30) …
+        state.start_drawing(10, 10);
+
+        // Build and render a preview up to (30,30) — sets live_dirty_rect
+        let preview_ann = state
+            .build_current_annotation((30, 30))
+            .expect("should build rect");
+        state.render_preview(Some(&preview_ann));
+        assert!(state.live_dirty_rect.is_some(), "dirty rect should be set");
+
+        // … but the final mouse-up is at (80,80), outside the preview dirty rect.
+        let final_ann = state
+            .build_current_annotation((80, 80))
+            .expect("should build rect");
+        state.commit_annotation(final_ann);
+        state.finish_drawing();
+
+        // After commit, live_preview must match composited_image pixel-for-pixel.
+        let preview_pixels = state
+            .live_preview
+            .as_ref()
+            .expect("live_preview must exist")
+            .as_raw()
+            .to_vec();
+        let composited_pixels = state.composited_image().as_raw().to_vec();
+        assert_eq!(
+            preview_pixels, composited_pixels,
+            "live_preview must equal composited_image after commit"
+        );
+    }
+
+    /// Item 2: add_drawing_point must be a no-op when start_pt is None.
+    #[test]
+    fn test_add_drawing_point_ignores_when_no_start() {
+        let frame = create_dummy_frame(100, 100);
+        let mut state = AppState::new(frame);
+
+        // No start_drawing() call → start_pt is None
+        assert!(state.start_pt.is_none());
+        state.add_drawing_point(50, 50);
+        // current_points must remain empty
+        assert!(
+            state.current_points.is_empty(),
+            "add_drawing_point must be a no-op when start_pt is None"
+        );
+    }
+
+    /// Item 8: build_current_annotation returns None for degenerate shapes.
+    #[test]
+    fn test_degenerate_annotations_rejected() {
+        let frame = create_dummy_frame(100, 100);
+        let mut state = AppState::new(frame);
+
+        // Rectangle with zero width (start == end on x-axis)
+        state.set_tool(Tool::Rectangle);
+        state.start_drawing(50, 10);
+        assert!(
+            state.build_current_annotation((50, 50)).is_none(),
+            "zero-width rect must be rejected"
+        );
+        assert!(
+            state.build_current_annotation((60, 10)).is_none(),
+            "zero-height rect must be rejected"
+        );
+
+        // Redact with zero area
+        state.set_tool(Tool::Redact);
+        state.start_drawing(20, 20);
+        assert!(
+            state.build_current_annotation((20, 20)).is_none(),
+            "zero-size redact must be rejected"
+        );
+        assert!(
+            state.build_current_annotation((20, 40)).is_none(),
+            "zero-width redact must be rejected"
+        );
+
+        // Line with start == end
+        state.set_tool(Tool::Line);
+        state.start_drawing(30, 30);
+        assert!(
+            state.build_current_annotation((30, 30)).is_none(),
+            "zero-length line must be rejected"
+        );
+
+        // Arrow with start == end
+        state.set_tool(Tool::Arrow);
+        state.start_drawing(10, 10);
+        assert!(
+            state.build_current_annotation((10, 10)).is_none(),
+            "zero-length arrow must be rejected"
+        );
+    }
+
+    /// Item 10: get_final_crop must produce fully opaque pixels.
+    #[test]
+    fn test_get_final_crop_forces_alpha_255() {
+        // Create a frame with semi-transparent pixels
+        let raw = RgbaImage::from_pixel(100, 100, image::Rgba([200, 100, 50, 128]));
+        let frame = CapturedFrame {
+            raw_image: raw,
+            slint_image: Image::default(),
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let mut state = AppState::new(frame);
+        state.selection.set_bounds(10, 10, 20, 20);
+        let crop = state.get_final_crop().expect("should produce crop");
+        for pixel in crop.pixels() {
+            assert_eq!(pixel[3], 255, "all cropped pixels must have alpha=255");
+        }
     }
 }

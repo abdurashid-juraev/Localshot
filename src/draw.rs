@@ -371,14 +371,7 @@ fn blend_pixel(canvas: &mut RgbaImage, x: u32, y: u32, src: [u8; 4]) {
 }
 
 /// Privacy Redact/Blur pixelation block (Zero disk residue)
-fn apply_pixelation(
-    canvas: &mut RgbaImage,
-    rx: i32,
-    ry: i32,
-    rw: i32,
-    rh: i32,
-    block_size: i32,
-) {
+fn apply_pixelation(canvas: &mut RgbaImage, rx: i32, ry: i32, rw: i32, rh: i32, block_size: i32) {
     let (img_w, img_h) = canvas.dimensions();
     let bs = block_size.max(4);
 
@@ -440,17 +433,13 @@ pub fn copy_rect(src: &RgbaImage, dst: &mut RgbaImage, x: u32, y: u32, w: u32, h
     for py in y..max_y {
         let src_idx = py as usize * src_stride + (x * 4) as usize;
         let dst_idx = py as usize * dst_stride + (x * 4) as usize;
-        dst_raw[dst_idx..dst_idx + row_bytes].copy_from_slice(&src_raw[src_idx..src_idx + row_bytes]);
+        dst_raw[dst_idx..dst_idx + row_bytes]
+            .copy_from_slice(&src_raw[src_idx..src_idx + row_bytes]);
     }
 }
 
 /// Draws uniform semi-transparent highlighter stroke without overlapping dark blemishes
-fn draw_marker(
-    canvas: &mut RgbaImage,
-    points: &[(i32, i32)],
-    color: [u8; 4],
-    thickness: i32,
-) {
+fn draw_marker(canvas: &mut RgbaImage, points: &[(i32, i32)], color: [u8; 4], thickness: i32) {
     if points.is_empty() {
         return;
     }
@@ -475,10 +464,28 @@ fn draw_marker(
     let mut mask = vec![false; bbox_w * bbox_h];
 
     if points.len() == 1 {
-        mark_circle_mask(&mut mask, x0, y0, bbox_w, bbox_h, points[0].0, points[0].1, radius);
+        mark_circle_mask(
+            &mut mask,
+            x0,
+            y0,
+            bbox_w,
+            bbox_h,
+            points[0].0,
+            points[0].1,
+            radius,
+        );
     } else {
         for i in 1..points.len() {
-            mark_line_mask(&mut mask, x0, y0, bbox_w, bbox_h, points[i - 1], points[i], radius);
+            mark_line_mask(
+                &mut mask,
+                x0,
+                y0,
+                bbox_w,
+                bbox_h,
+                points[i - 1],
+                points[i],
+                radius,
+            );
         }
     }
 
@@ -509,9 +516,13 @@ fn mark_circle_mask(
 ) {
     let r2 = radius * radius;
     let min_x = (cx - radius - origin_x as i32).max(0) as usize;
-    let max_x = (cx + radius - origin_x as i32).min(bbox_w as i32 - 1).max(0) as usize;
+    let max_x = (cx + radius - origin_x as i32)
+        .min(bbox_w as i32 - 1)
+        .max(0) as usize;
     let min_y = (cy - radius - origin_y as i32).max(0) as usize;
-    let max_y = (cy + radius - origin_y as i32).min(bbox_h as i32 - 1).max(0) as usize;
+    let max_y = (cy + radius - origin_y as i32)
+        .min(bbox_h as i32 - 1)
+        .max(0) as usize;
 
     for y in min_y..=max_y {
         for x in min_x..=max_x {
@@ -620,4 +631,3 @@ mod tests {
         assert_eq!(pixel[0], 255); // Red component set
     }
 }
-

@@ -135,4 +135,3 @@ mod tests {
         assert_eq!(format_timestamp_utc(1727471736), "2024-09-27_211536");
     }
 }
-

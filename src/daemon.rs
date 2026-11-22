@@ -1,4 +1,5 @@
-use std::sync::Mutex;
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DaemonInitResult {
@@ -6,41 +7,47 @@ pub enum DaemonInitResult {
     AlreadyRunningSignaled,
 }
 
-type DaemonCallback = Box<dyn Fn() + Send + Sync + 'static>;
+// Item 7: store callbacks as Arc<dyn Fn()> so we can clone the Arc out of the
+// lock before calling, preventing calling a callback while holding the lock.
+type DaemonCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 static CAPTURE_CALLBACK: Mutex<Option<DaemonCallback>> = Mutex::new(None);
 static QUIT_CALLBACK: Mutex<Option<DaemonCallback>> = Mutex::new(None);
 static UPDATE_CALLBACK: Mutex<Option<DaemonCallback>> = Mutex::new(None);
 
 pub fn set_capture_callback<F: Fn() + Send + Sync + 'static>(cb: F) {
-    *CAPTURE_CALLBACK.lock().unwrap() = Some(Box::new(cb));
+    *CAPTURE_CALLBACK.lock() = Some(Arc::new(cb));
 }
 
 pub fn set_quit_callback<F: Fn() + Send + Sync + 'static>(cb: F) {
-    *QUIT_CALLBACK.lock().unwrap() = Some(Box::new(cb));
+    *QUIT_CALLBACK.lock() = Some(Arc::new(cb));
 }
 
 #[allow(dead_code)]
 pub fn set_update_callback<F: Fn() + Send + Sync + 'static>(cb: F) {
-    *UPDATE_CALLBACK.lock().unwrap() = Some(Box::new(cb));
+    *UPDATE_CALLBACK.lock() = Some(Arc::new(cb));
 }
 
 #[allow(dead_code)]
 pub fn trigger_capture() {
-    if let Some(cb) = CAPTURE_CALLBACK.lock().unwrap().as_ref() {
+    // Clone the Arc out of the lock before calling (item 7: no callback under lock)
+    let cb = CAPTURE_CALLBACK.lock().clone();
+    if let Some(cb) = cb {
         cb();
     }
 }
 
 #[allow(dead_code)]
 pub fn trigger_quit() {
-    if let Some(cb) = QUIT_CALLBACK.lock().unwrap().as_ref() {
+    let cb = QUIT_CALLBACK.lock().clone();
+    if let Some(cb) = cb {
         cb();
     }
 }
 
 #[allow(dead_code)]
 pub fn trigger_update_check() {
-    if let Some(cb) = UPDATE_CALLBACK.lock().unwrap().as_ref() {
+    let cb = UPDATE_CALLBACK.lock().clone();
+    if let Some(cb) = cb {
         cb();
     } else {
         std::thread::spawn(|| {
@@ -149,7 +156,7 @@ mod windows_impl {
                 }
             }
         }
-        Icon::from_rgba(rgba, size, size).unwrap()
+        Icon::from_rgba(rgba, size, size).expect("valid icon dimensions")
     }
 
     pub fn init_daemon() -> DaemonState {

@@ -3217,6 +3217,7 @@ dependencies = [
  "global-hotkey",
  "image",
  "muda 0.20.0",
+ "parking_lot",
  "rfd",
  "serde_json",
  "slint",
@@ -3225,6 +3226,7 @@ dependencies = [
  "ureq",
  "winres",
  "xcap",
+ "xcb",
  "zeroize",
 ]
 
