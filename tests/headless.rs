@@ -200,11 +200,21 @@ fn headless_updater_version_and_asset_logic() {
 
 #[test]
 fn headless_daemon_ipc_command_and_tooltip_logic() {
-    assert_eq!(parse_ipc_command("AREA"), Ok(IpcCommand::CaptureArea));
-    assert_eq!(parse_ipc_command("  area \n"), Ok(IpcCommand::CaptureArea));
-    assert_eq!(parse_ipc_command("FULL"), Ok(IpcCommand::CaptureFull));
-    assert_eq!(parse_ipc_command("QUIT"), Ok(IpcCommand::Quit));
+    assert_eq!(
+        parse_ipc_command("CAPTURE_AREA"),
+        Ok(IpcCommand::CaptureArea)
+    );
+    assert_eq!(
+        parse_ipc_command("CAPTURE_AREA\r\n"),
+        Ok(IpcCommand::CaptureArea)
+    );
+    assert_eq!(
+        parse_ipc_command("CAPTURE_FULL"),
+        Ok(IpcCommand::CaptureFull)
+    );
+    assert_eq!(parse_ipc_command("QUIT\n"), Ok(IpcCommand::Quit));
     assert_eq!(parse_ipc_command("PING"), Ok(IpcCommand::Ping));
+    assert!(parse_ipc_command("area").is_err());
     assert!(parse_ipc_command("UNKNOWN").is_err());
 
     let both = tray_tooltip_for_hotkeys(true, true);
