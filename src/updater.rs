@@ -13,9 +13,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const GITHUB_REPO: &str = "abdurashid-juraev/Localshot";
 const USER_AGENT: &str = "LocalShot-DesktopApp";
 const AUTO_CHECK_COOLDOWN_SECS: u64 = 86400; // 24 hours
+#[cfg(target_os = "windows")]
 const MAX_REDIRECT_HOPS: usize = 5;
+#[cfg(target_os = "windows")]
 const MAX_INSTALLER_BYTES: u64 = 200 * 1024 * 1024; // 200 MB
+#[cfg(target_os = "windows")]
 const MAX_SIGNATURE_BYTES: u64 = 64 * 1024; // 64 KB
+#[cfg(any(target_os = "windows", test))]
 const ALLOWED_DOWNLOAD_HOSTS: &[&str] = &[
     "github.com",
     "objects.githubusercontent.com",
@@ -288,6 +292,7 @@ pub fn validate_download_url(url: &str, allowed_hosts: &[&str]) -> Result<(), St
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn resolve_redirect_url(current_url: &str, location: &str) -> Result<String, String> {
     if location.starts_with("https://") {
         return Ok(location.to_string());
@@ -305,6 +310,7 @@ fn resolve_redirect_url(current_url: &str, location: &str) -> Result<String, Str
     Err("Unsupported or insecure redirect location".to_string())
 }
 
+#[cfg(target_os = "windows")]
 fn fetch_with_validated_redirects(
     initial_url: &str,
     allowed_hosts: &[&str],
@@ -380,6 +386,7 @@ pub fn verify_minisign_file(
         .map_err(|e| format!("Signature verification failed: {}", e))
 }
 
+#[cfg(target_os = "windows")]
 fn read_response_limited(resp: ureq::Response, max_bytes: u64) -> Result<Vec<u8>, String> {
     if let Some(len_str) = resp.header("Content-Length") {
         if let Ok(len) = len_str.trim().parse::<u64>() {
