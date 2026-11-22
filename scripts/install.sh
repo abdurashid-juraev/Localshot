@@ -23,8 +23,10 @@ mkdir -p "$BIN_DIR" "$APP_DIR" "$ICON_DIR" "$AUTOSTART_DIR"
 
 install -m 755 "$DIR/target/release/localshot" "$BIN_DIR/localshot"
 install -m 644 "$DIR/assets/icon.svg" "$ICON_DIR/localshot.svg"
-install -m 644 "$DIR/assets/localshot.desktop" "$APP_DIR/localshot.desktop"
-install -m 644 "$DIR/assets/localshot-autostart.desktop" "$AUTOSTART_DIR/localshot.desktop"
+sed "s|^Exec=localshot|Exec=$BIN_DIR/localshot|" "$DIR/assets/localshot.desktop" > "$APP_DIR/localshot.desktop"
+chmod 644 "$APP_DIR/localshot.desktop"
+sed "s|^Exec=localshot|Exec=$BIN_DIR/localshot|" "$DIR/assets/localshot-autostart.desktop" > "$AUTOSTART_DIR/localshot.desktop"
+chmod 644 "$AUTOSTART_DIR/localshot.desktop"
 
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true
