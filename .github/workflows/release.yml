@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  checks: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,8 +45,9 @@ jobs:
             libwayland-dev
 
       - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.90.0"
           components: rustfmt, clippy
 
       - name: Rust Cache
@@ -122,8 +124,9 @@ jobs:
             libwayland-dev
 
       - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.90.0"
           targets: ${{ matrix.target }}
 
       - name: Rust Cache
