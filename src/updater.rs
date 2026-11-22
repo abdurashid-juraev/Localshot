@@ -886,13 +886,18 @@ mod tests {
 
     #[test]
     fn test_minisign_verification_rejects_tampered_file() {
+        const TEST_MINISIGN_PUBKEY: &str =
+            "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";
         let sig_text = "untrusted comment: signature from minisign secret key\n\
             RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=\n\
             trusted comment: timestamp:1556193335\tfile:test\n\
             y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+bHwhEBg==";
 
+        // Embedded production public key must be valid base64 Minisign format
+        assert!(PublicKey::from_base64(UPDATER_MINISIGN_PUBKEY.trim()).is_ok());
+
         // Valid payload passes
-        assert!(verify_minisign_bytes(UPDATER_MINISIGN_PUBKEY, b"test", sig_text).is_ok());
+        assert!(verify_minisign_bytes(TEST_MINISIGN_PUBKEY, b"test", sig_text).is_ok());
 
         // Tampered payload in file fails
         let tmp_dir =
@@ -903,8 +908,10 @@ mod tests {
         fs::write(&valid_file, b"test").unwrap();
         fs::write(&tampered_file, b"test-tampered").unwrap();
 
-        assert!(verify_minisign_file(UPDATER_MINISIGN_PUBKEY, &valid_file, sig_text).is_ok());
-        assert!(verify_minisign_file(UPDATER_MINISIGN_PUBKEY, &tampered_file, sig_text).is_err());
+        assert!(verify_minisign_file(TEST_MINISIGN_PUBKEY, &valid_file, sig_text).is_ok());
+        assert!(verify_minisign_file(TEST_MINISIGN_PUBKEY, &tampered_file, sig_text).is_err());
+        // Production key must reject signatures from other keys
+        assert!(verify_minisign_file(UPDATER_MINISIGN_PUBKEY, &valid_file, sig_text).is_err());
 
         let _ = fs::remove_dir_all(&tmp_dir);
     }
