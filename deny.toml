@@ -9,16 +9,26 @@ all-features = false
 [advisories]
 db-path = "~/.cargo/advisory-db"
 yanked = "warn"
-ignore = []
+unmaintained = "workspace"
+ignore = [
+    # glib 0.18.5 is pinned transitively by gtk = "0.18" / tray-icon
+    "RUSTSEC-2024-0429",
+]
 
 [licenses]
 allow = [
     "MIT",
+    "MIT-0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
+    "CDLA-Permissive-2.0",
+    "OpenSSL",
+    "Unlicense",
+    "0BSD",
+    "NCSA",
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "Zlib",
