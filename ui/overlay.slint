@@ -853,8 +853,11 @@ export component OverlayWindow inherits Window {
         }
     }
 
-    // Keyboard Shortcuts
+    // Keyboard Shortcuts (0x0 + focus-on-click: false so it never swallows the first pointer down)
     key-handler := FocusScope {
+        width: 0px;
+        height: 0px;
+        focus-on-click: false;
         key-pressed(event) => {
             if (event.text == Key.Escape) {
                 root.escape-pressed();

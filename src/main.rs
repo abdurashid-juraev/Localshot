@@ -596,6 +596,7 @@ fn perform_capture(overlay: &OverlayWindow, state_lock: &Arc<Mutex<Option<AppSta
             overlay.set_cursor_name("crosshair".into());
 
             position_and_show_overlay(overlay, x, y, w, h);
+            overlay.invoke_focus_key_handler();
             if perf_enabled {
                 let total_ms = perf_start.elapsed().as_secs_f64() * 1000.0;
                 eprintln!(
